@@ -8,6 +8,7 @@ struct FileSystemEntry: Equatable, Sendable {
 
 protocol FileSystem {
     func exists(at url: URL) -> Bool
+    func isDirectory(at url: URL) throws -> Bool
     func directoryEntries(at url: URL) throws -> [FileSystemEntry]
     func readData(at url: URL) throws -> Data
     func modificationDate(at url: URL) -> Date?
@@ -18,6 +19,10 @@ struct LocalFileSystem: FileSystem {
 
     func exists(at url: URL) -> Bool {
         manager.fileExists(atPath: url.path)
+    }
+
+    func isDirectory(at url: URL) throws -> Bool {
+        try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
     }
 
     func directoryEntries(at url: URL) throws -> [FileSystemEntry] {

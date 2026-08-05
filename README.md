@@ -20,7 +20,11 @@ The package targets macOS 14.0 and uses only SwiftUI and Foundation.
 
 ## Configuration
 
-`dashboard-config.sample.json` is bundled with synthetic placeholder roots. A resolved `dashboard-config.json` belongs in the app's Application Support directory and is intentionally not source-controlled. The configuration loader validates exactly two products and does not perform automatic discovery.
+On first launch, the app enters setup instead of treating the bundled sample as a completed user configuration. Setup displays exactly Momentum Management and MomoMovies, lets the user choose or confirm one root for each with a native folder panel, and derives `Dashboard/Inbox` plus `Reference/Product/Operations Dashboard Status.md` beneath that root. It shows missing Inbox and future-status-record warnings without creating either path.
+
+`dashboard-config.sample.json` is a bundled synthetic schema example only. A resolved `dashboard-config.json` belongs at `~/Library/Application Support/Operations Dashboard/dashboard-config.json` and is intentionally not source-controlled. The configuration loader validates exactly two products, requires distinct accessible roots, and does not perform automatic discovery. A malformed saved configuration stays untouched and returns the app to setup with a visible error.
+
+For development, reset setup by removing only the local resolved configuration file above; do not modify selected product folders. The application writes only its own confirmed configuration and never creates, edits, moves, or deletes files in a selected product root.
 
 ## Fixtures
 

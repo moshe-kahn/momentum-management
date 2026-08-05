@@ -145,6 +145,7 @@ private struct StaticConfigurationLoader: ConfigurationLoading {
 private struct ThrowingFileSystem: FileSystem {
     let existingPaths: Set<URL>
     func exists(at url: URL) -> Bool { existingPaths.contains(url) }
+    func isDirectory(at url: URL) throws -> Bool { true }
     func directoryEntries(at url: URL) throws -> [FileSystemEntry] { throw CocoaError(.fileReadNoPermission) }
     func readData(at url: URL) throws -> Data { throw CocoaError(.fileReadNoPermission) }
     func modificationDate(at url: URL) -> Date? { nil }

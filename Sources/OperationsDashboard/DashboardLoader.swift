@@ -4,31 +4,62 @@ protocol ConfigurationLoading {
     func loadConfiguration() throws -> DashboardConfiguration
 }
 
-struct ConfigurationStore: ConfigurationLoading {
-    let fileManager: FileManager = .default
-    let bundle: Bundle = .module
+protocol ConfigurationStorage {
+    func loadData() throws -> Data?
+    func saveData(_ data: Data) throws
+}
 
-    var applicationSupportURL: URL {
+struct ApplicationSupportConfigurationStorage: ConfigurationStorage {
+    let fileManager: FileManager = .default
+
+    var configurationURL: URL {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appending(path: "Operations Dashboard", directoryHint: .isDirectory)
             .appending(path: "dashboard-config.json", directoryHint: .notDirectory)
     }
 
+    func loadData() throws -> Data? {
+        guard fileManager.fileExists(atPath: configurationURL.path) else { return nil }
+        return try Data(contentsOf: configurationURL)
+    }
+
+    func saveData(_ data: Data) throws {
+        try fileManager.createDirectory(at: configurationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: configurationURL, options: .atomic)
+    }
+}
+
+enum ConfigurationLaunchState: Equatable {
+    case setupRequired
+    case configured(DashboardConfiguration)
+    case malformed(String)
+}
+
+struct ConfigurationStore: ConfigurationLoading {
+    let storage: any ConfigurationStorage
+
+    init(storage: any ConfigurationStorage = ApplicationSupportConfigurationStorage()) {
+        self.storage = storage
+    }
+
+    func launchState() -> ConfigurationLaunchState {
+        do {
+            guard let data = try storage.loadData() else { return .setupRequired }
+            return .configured(try decode(data: data))
+        } catch {
+            return .malformed(error.localizedDescription)
+        }
+    }
+
     func loadConfiguration() throws -> DashboardConfiguration {
-        if fileManager.fileExists(atPath: applicationSupportURL.path) {
-            return try decode(data: Data(contentsOf: applicationSupportURL))
-        }
-        guard let sampleURL = bundle.url(forResource: "dashboard-config.sample", withExtension: "json") else {
-            throw ConfigurationError.absent
-        }
-        return try decode(data: Data(contentsOf: sampleURL))
+        guard case let .configured(configuration) = launchState() else { throw ConfigurationError.absent }
+        return configuration
     }
 
     func saveResolvedConfiguration(_ configuration: DashboardConfiguration) throws {
         let validated = try configuration.validated()
-        try fileManager.createDirectory(at: applicationSupportURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(validated)
-        try data.write(to: applicationSupportURL, options: .atomic)
+        try storage.saveData(data)
     }
 
     func decode(data: Data) throws -> DashboardConfiguration {
@@ -54,7 +85,11 @@ struct DashboardLoader {
     }
 
     func load() throws -> [ProductDashboardState] {
-        try configurationLoader.loadConfiguration().products.map(loadProduct)
+        try load(configuration: configurationLoader.loadConfiguration())
+    }
+
+    func load(configuration: DashboardConfiguration) throws -> [ProductDashboardState] {
+        try configuration.validated().products.map(loadProduct)
     }
 
     private func loadProduct(_ product: ConfiguredProduct) -> ProductDashboardState {
