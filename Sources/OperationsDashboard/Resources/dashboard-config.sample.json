@@ -1,0 +1,19 @@
+{
+  "schemaVersion" : 1,
+  "products" : [
+    {
+      "id" : "momentum-management",
+      "displayName" : "Momentum Management",
+      "productRootPath" : "/synthetic/momentum-management",
+      "inboxRelativePath" : "Dashboard/Inbox",
+      "statusRecordRelativePath" : "Reference/Product/Operations Dashboard Status.md"
+    },
+    {
+      "id" : "momomovies",
+      "displayName" : "MomoMovies",
+      "productRootPath" : "/synthetic/momomovies",
+      "inboxRelativePath" : "Dashboard/Inbox",
+      "statusRecordRelativePath" : "Reference/Product/Operations Dashboard Status.md"
+    }
+  ]
+}
