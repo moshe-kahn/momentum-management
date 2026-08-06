@@ -152,6 +152,7 @@ private final class MemoryConfigurationStorage: ConfigurationStorage {
 
 private struct InaccessibleRootFileSystem: FileSystem {
     func exists(at url: URL) -> Bool { true }
+    func isReadable(at url: URL) -> Bool { false }
     func isDirectory(at url: URL) throws -> Bool { throw CocoaError(.fileReadNoPermission) }
     func directoryEntries(at url: URL) throws -> [FileSystemEntry] { throw CocoaError(.fileReadNoPermission) }
     func readData(at url: URL) throws -> Data { throw CocoaError(.fileReadNoPermission) }

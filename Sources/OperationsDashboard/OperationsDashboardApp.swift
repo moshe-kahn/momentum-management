@@ -18,18 +18,21 @@ final class DashboardViewModel: ObservableObject {
     @Published private(set) var setupResult = SetupValidationResult(errors: [], warnings: [], assessments: [])
     @Published private(set) var isShowingSetup = true
     @Published private(set) var setupSaveError: String?
+    @Published private(set) var sourceOpenError: String?
 
     private let store: ConfigurationStore
     private let fileSystem: any FileSystem
+    private let sourceOpener: any SourceOpening
     private var hasSavedConfiguration = false
 
     static func live() -> DashboardViewModel {
-        DashboardViewModel(store: ConfigurationStore(), fileSystem: LocalFileSystem())
+        DashboardViewModel(store: ConfigurationStore(), fileSystem: LocalFileSystem(), sourceOpener: WorkspaceSourceOpener())
     }
 
-    init(store: ConfigurationStore, fileSystem: any FileSystem) {
+    init(store: ConfigurationStore, fileSystem: any FileSystem, sourceOpener: any SourceOpening = WorkspaceSourceOpener()) {
         self.store = store
         self.fileSystem = fileSystem
+        self.sourceOpener = sourceOpener
         reloadLaunchState()
     }
 
@@ -39,6 +42,25 @@ final class DashboardViewModel: ObservableObject {
             return
         }
         loadDashboard()
+    }
+
+    func canOpen(_ action: SourceAction, for product: ProductDashboardState) -> Bool {
+        let target = action.targetURL(for: product.product)
+        return fileSystem.exists(at: target) && fileSystem.isReadable(at: target)
+    }
+
+    func open(_ action: SourceAction, for product: ProductDashboardState) {
+        sourceOpenError = nil
+        let target = action.targetURL(for: product.product)
+        guard canOpen(action, for: product) else {
+            sourceOpenError = "\(action.title) is unavailable because its source path is missing or unreadable."
+            return
+        }
+        do {
+            try sourceOpener.open(target)
+        } catch {
+            sourceOpenError = "\(action.title) failed: \(error.localizedDescription)"
+        }
     }
 
     func reopenSetup() {
@@ -144,21 +166,67 @@ struct DashboardView: View {
                 ContentUnavailableView("Configuration unavailable", systemImage: "exclamationmark.triangle", description: Text(error))
             } else {
                 List(viewModel.products) { product in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(product.product.displayName).font(.headline)
-                        Text(product.inboxCount.map { "Inbox: \($0)" } ?? "Inbox unavailable")
-                        Text(product.status?.currentStatus ?? "Status unavailable")
-                        if !product.issues.isEmpty {
-                            Text(product.issues.map(\.message).joined(separator: " · "))
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    .padding(.vertical, 4)
+                    ProductSummaryView(product: product, viewModel: viewModel)
                 }
+            }
+            if let error = viewModel.sourceOpenError {
+                Text(error).font(.caption).foregroundStyle(.orange)
             }
         }
         .padding()
         .frame(minWidth: 640, minHeight: 420)
+    }
+}
+
+private struct ProductSummaryView: View {
+    let product: ProductDashboardState
+    @ObservedObject var viewModel: DashboardViewModel
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(product.product.displayName).font(.headline)
+            Text(product.inboxCount.map { "Inbox: \($0)" } ?? "Inbox unavailable")
+            if let status = product.status {
+                Text("Status: \(status.currentStatus)")
+                Text("Last updated: \(Self.dateFormatter.string(from: status.lastUpdated))")
+                list("Next actions", items: status.nextActions)
+                list("Blockers", items: status.blockers)
+            } else {
+                Text("Status unavailable")
+            }
+            if !product.issues.isEmpty {
+                Text(product.issues.map(\.message).joined(separator: " · "))
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                ForEach(SourceAction.allCases) { action in
+                    if viewModel.canOpen(action, for: product) {
+                        Button(action.title) { viewModel.open(action, for: product) }
+                    }
+                }
+            }
+            .font(.caption)
+        }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func list(_ title: String, items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.subheadline.weight(.semibold))
+            ForEach(StatusListDisplay.items(items), id: \.self) { item in
+                Text("• \(item)")
+            }
+        }
     }
 }
 

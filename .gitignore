@@ -2,6 +2,7 @@
 DerivedData/
 build/
 .build/
+.swiftpm/
 xcuserdata/
 *.xcuserstate
 *.xccheckout

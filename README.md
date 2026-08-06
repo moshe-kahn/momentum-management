@@ -1,10 +1,10 @@
 # Operations Dashboard
 
-Operations Dashboard is a reusable operating-view capability owned by Momentum Management. This repository implements its first Kahntra-specific, read-only macOS instance. Milestone 1 establishes the configuration, filesystem, parsing, aggregation, fixtures, and minimal SwiftUI list needed to validate that instance contract.
+Operations Dashboard is a reusable operating-view capability owned by Momentum Management. This repository implements its first Kahntra-specific, read-only macOS instance. It establishes the configuration, filesystem, parsing, aggregation, fixtures, and a restrained SwiftUI operating view needed to validate that instance contract.
 
 ## Scope
 
-The app supports exactly two explicitly configured products. It counts visible immediate Inbox entries and parses only the documented `# Status` Markdown schema. It never discovers products, edits files, sends network requests, or connects to real Kahntra folders during Milestone 1.
+The app supports exactly two explicitly configured products. It counts visible immediate Inbox entries and parses only the documented `# Status` Markdown schema. The overview shows Status, Last updated, Next actions, Blockers, and source warnings. It can ask macOS to open only an existing configured product root, Inbox, or status record. It never discovers products, edits files, or sends network requests.
 
 ## Build and test
 
