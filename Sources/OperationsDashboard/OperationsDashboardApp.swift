@@ -19,6 +19,7 @@ final class DashboardViewModel: ObservableObject {
     @Published private(set) var isShowingSetup = true
     @Published private(set) var setupSaveError: String?
     @Published private(set) var sourceOpenError: String?
+    @Published private(set) var selectedProductID: String?
 
     private let store: ConfigurationStore
     private let fileSystem: any FileSystem
@@ -42,6 +43,16 @@ final class DashboardViewModel: ObservableObject {
             return
         }
         loadDashboard()
+    }
+
+    func selectProduct(id: String) {
+        guard products.contains(where: { $0.id == id }) else { return }
+        selectedProductID = id
+    }
+
+    var selectedProduct: ProductDashboardState? {
+        guard let selectedProductID else { return nil }
+        return products.first(where: { $0.id == selectedProductID })
     }
 
     func canOpen(_ action: SourceAction, for product: ProductDashboardState) -> Bool {
@@ -137,10 +148,18 @@ final class DashboardViewModel: ObservableObject {
     private func loadDashboard(configuration: DashboardConfiguration) {
         do {
             products = try DashboardLoader(configurationLoader: store, fileSystem: fileSystem).load(configuration: configuration)
+            reconcileSelection()
             configurationError = nil
         } catch {
             products = []
             configurationError = error.localizedDescription
+        }
+    }
+
+    private func reconcileSelection() {
+        guard products.contains(where: { $0.id == selectedProductID }) else {
+            selectedProductID = products.first?.id
+            return
         }
     }
 }
@@ -165,8 +184,20 @@ struct DashboardView: View {
             } else if let error = viewModel.configurationError {
                 ContentUnavailableView("Configuration unavailable", systemImage: "exclamationmark.triangle", description: Text(error))
             } else {
-                List(viewModel.products) { product in
-                    ProductSummaryView(product: product, viewModel: viewModel)
+                List {
+                    ForEach(viewModel.products) { product in
+                        ProductOverviewRow(
+                            product: product,
+                            isSelected: viewModel.selectedProductID == product.id,
+                            select: { viewModel.selectProduct(id: product.id) }
+                        )
+                    }
+                }
+                .frame(maxHeight: 180)
+                if let product = viewModel.selectedProduct {
+                    SelectedProductDetailView(product: product, viewModel: viewModel)
+                } else {
+                    ContentUnavailableView("No product selected", systemImage: "sidebar.left", description: Text("Select a configured product to inspect its sources."))
                 }
             }
             if let error = viewModel.sourceOpenError {
@@ -178,11 +209,35 @@ struct DashboardView: View {
     }
 }
 
-private struct ProductSummaryView: View {
+private struct ProductOverviewRow: View {
+    let product: ProductDashboardState
+    let isSelected: Bool
+    let select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(product.product.displayName).font(.headline)
+                Text(product.inboxCount.map { "Inbox: \($0)" } ?? "Inbox unavailable")
+                Text(product.status?.currentStatus ?? "Status unavailable")
+                if !product.issues.isEmpty {
+                    Text(product.issues.map(\.message).joined(separator: " · "))
+                        .foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+    }
+}
+
+private struct SelectedProductDetailView: View {
     let product: ProductDashboardState
     @ObservedObject var viewModel: DashboardViewModel
 
-    private static let dateFormatter: DateFormatter = {
+    private static let declaredDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -191,32 +246,71 @@ private struct ProductSummaryView: View {
         return formatter
     }()
 
+    private static let metadataDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
+        return formatter
+    }()
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(product.product.displayName).font(.headline)
+        GroupBox("Selected product") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(product.product.displayName).font(.headline)
+                Text(product.issues.isEmpty ? "Sources: Available" : "Sources: Warning")
             Text(product.inboxCount.map { "Inbox: \($0)" } ?? "Inbox unavailable")
             if let status = product.status {
                 Text("Status: \(status.currentStatus)")
-                Text("Last updated: \(Self.dateFormatter.string(from: status.lastUpdated))")
+                    Text("Declared Last updated: \(Self.declaredDateFormatter.string(from: status.lastUpdated))")
                 list("Next actions", items: status.nextActions)
                 list("Blockers", items: status.blockers)
             } else {
                 Text("Status unavailable")
             }
+                Text("Status record file modified: \(metadataDate)")
+                sourceRoles
             if !product.issues.isEmpty {
                 Text(product.issues.map(\.message).joined(separator: " · "))
                     .foregroundStyle(.orange)
             }
-            HStack {
-                ForEach(SourceAction.allCases) { action in
-                    if viewModel.canOpen(action, for: product) {
-                        Button(action.title) { viewModel.open(action, for: product) }
-                    }
-                }
             }
-            .font(.caption)
         }
-        .padding(.vertical, 6)
+    }
+
+    private var metadataDate: String {
+        guard let date = product.statusRecordMetadata?.modificationDate else { return "Unavailable" }
+        return Self.metadataDateFormatter.string(from: date)
+    }
+
+    private var sourceRoles: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Configured sources").font(.subheadline.weight(.semibold))
+            sourceRole(.productFolder)
+            sourceRole(.inboxFolder)
+            sourceRole(.statusRecord)
+        }
+    }
+
+    @ViewBuilder
+    private func sourceRole(_ action: SourceAction) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(action.roleLabel)
+                Text(action.targetURL(for: product.product).path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(viewModel.canOpen(action, for: product) ? "Available" : "Unavailable")
+                    .font(.caption)
+                    .foregroundStyle(viewModel.canOpen(action, for: product) ? Color.secondary : Color.orange)
+            }
+            Spacer()
+            if viewModel.canOpen(action, for: product) {
+                Button(action.title) { viewModel.open(action, for: product) }
+                    .font(.caption)
+            }
+        }
     }
 
     @ViewBuilder

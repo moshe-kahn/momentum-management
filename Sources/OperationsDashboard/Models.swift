@@ -72,12 +72,18 @@ struct OperatingStatus: Equatable, Sendable {
     let sourceModificationDate: Date?
 }
 
+struct StatusRecordMetadata: Equatable, Sendable {
+    let modificationDate: Date?
+    let issue: String?
+}
+
 enum SourceIssue: Equatable, Sendable {
     case missingInbox
     case missingStatusRecord
     case unreadableInbox(String)
     case unreadableStatusRecord(String)
     case malformedStatusRecord(String)
+    case statusRecordMetadataUnavailable(String)
 
     var message: String {
         switch self {
@@ -86,6 +92,7 @@ enum SourceIssue: Equatable, Sendable {
         case let .unreadableInbox(message): "Unreadable Inbox: \(message)"
         case let .unreadableStatusRecord(message): "Unreadable status record: \(message)"
         case let .malformedStatusRecord(message): "Malformed status record: \(message)"
+        case let .statusRecordMetadataUnavailable(message): "Status record metadata unavailable: \(message)"
         }
     }
 }
@@ -94,6 +101,7 @@ struct ProductDashboardState: Identifiable, Equatable, Sendable {
     let product: ConfiguredProduct
     let inboxCount: Int?
     let status: OperatingStatus?
+    let statusRecordMetadata: StatusRecordMetadata?
     let issues: [SourceIssue]
 
     var id: String { product.id }

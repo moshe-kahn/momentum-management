@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-enum SourceAction: CaseIterable, Identifiable {
+enum SourceAction: CaseIterable, Identifiable, Hashable {
     case productFolder
     case inboxFolder
     case statusRecord
@@ -13,6 +13,14 @@ enum SourceAction: CaseIterable, Identifiable {
         case .productFolder: "Open Product Folder"
         case .inboxFolder: "Open Inbox Folder"
         case .statusRecord: "Open Status Record"
+        }
+    }
+
+    var roleLabel: String {
+        switch self {
+        case .productFolder: "Product root"
+        case .inboxFolder: "Inbox"
+        case .statusRecord: "Status record"
         }
     }
 

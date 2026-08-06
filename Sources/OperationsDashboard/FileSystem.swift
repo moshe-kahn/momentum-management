@@ -12,7 +12,7 @@ protocol FileSystem {
     func isDirectory(at url: URL) throws -> Bool
     func directoryEntries(at url: URL) throws -> [FileSystemEntry]
     func readData(at url: URL) throws -> Data
-    func modificationDate(at url: URL) -> Date?
+    func modificationDate(at url: URL) throws -> Date?
 }
 
 struct LocalFileSystem: FileSystem {
@@ -47,8 +47,8 @@ struct LocalFileSystem: FileSystem {
         try Data(contentsOf: url)
     }
 
-    func modificationDate(at url: URL) -> Date? {
-        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    func modificationDate(at url: URL) throws -> Date? {
+        try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
     }
 }
 

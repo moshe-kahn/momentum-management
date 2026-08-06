@@ -149,5 +149,5 @@ private struct ThrowingFileSystem: FileSystem {
     func isDirectory(at url: URL) throws -> Bool { true }
     func directoryEntries(at url: URL) throws -> [FileSystemEntry] { throw CocoaError(.fileReadNoPermission) }
     func readData(at url: URL) throws -> Data { throw CocoaError(.fileReadNoPermission) }
-    func modificationDate(at url: URL) -> Date? { nil }
+    func modificationDate(at url: URL) throws -> Date? { nil }
 }

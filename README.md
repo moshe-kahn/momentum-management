@@ -4,7 +4,7 @@ Operations Dashboard is a reusable operating-view capability owned by Momentum M
 
 ## Scope
 
-The app supports exactly two explicitly configured products. It counts visible immediate Inbox entries and parses only the documented `# Status` Markdown schema. The overview shows Status, Last updated, Next actions, Blockers, and source warnings. It can ask macOS to open only an existing configured product root, Inbox, or status record. It never discovers products, edits files, or sends network requests.
+The app supports exactly two explicitly configured products. It counts visible immediate Inbox entries and parses only the documented `# Status` Markdown schema. The overview compares product name, Inbox count, current Status, and warnings. Selecting a product in the same window shows its complete operating detail: declared Last updated, Next actions, Blockers, source-role availability, and status-record filesystem modification time. Declared Last updated and file modification time are visibly distinct and neither is used to infer priority or freshness. Selection is in memory only. The app can ask macOS to open only an existing configured product root, Inbox, or status record. It never discovers products, edits files, or sends network requests.
 
 ## Build and test
 

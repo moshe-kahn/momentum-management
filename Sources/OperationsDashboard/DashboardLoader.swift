@@ -98,6 +98,7 @@ struct DashboardLoader {
         var issues: [SourceIssue] = []
         var inboxCount: Int?
         var status: OperatingStatus?
+        var statusRecordMetadata: StatusRecordMetadata?
 
         if !fileSystem.exists(at: inboxURL) {
             issues.append(.missingInbox)
@@ -109,8 +110,21 @@ struct DashboardLoader {
         if !fileSystem.exists(at: statusURL) {
             issues.append(.missingStatusRecord)
         } else {
+            let modificationDate: Date?
+            let metadataIssue: String?
             do {
-                status = try parser.parse(data: fileSystem.readData(at: statusURL), sourceModificationDate: fileSystem.modificationDate(at: statusURL))
+                modificationDate = try fileSystem.modificationDate(at: statusURL)
+                metadataIssue = modificationDate == nil ? "Modification date is unavailable." : nil
+            } catch {
+                modificationDate = nil
+                metadataIssue = error.localizedDescription
+            }
+            statusRecordMetadata = StatusRecordMetadata(modificationDate: modificationDate, issue: metadataIssue)
+            if let metadataIssue {
+                issues.append(.statusRecordMetadataUnavailable(metadataIssue))
+            }
+            do {
+                status = try parser.parse(data: fileSystem.readData(at: statusURL), sourceModificationDate: modificationDate)
             } catch let error as StatusParseError {
                 issues.append(.malformedStatusRecord(error.localizedDescription))
             } catch {
@@ -118,6 +132,6 @@ struct DashboardLoader {
             }
         }
 
-        return ProductDashboardState(product: product, inboxCount: inboxCount, status: status, issues: issues)
+        return ProductDashboardState(product: product, inboxCount: inboxCount, status: status, statusRecordMetadata: statusRecordMetadata, issues: issues)
     }
 }
