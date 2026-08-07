@@ -21,11 +21,16 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
     @Published private(set) var moveResult: IntakeMoveBatchResult?
     @Published private(set) var isMoveInProgress = false
     @Published var isConfirmationPresented = false
+    @Published var quickCaptureText = ""
+    @Published private(set) var quickCaptureResult: QuickCaptureResult?
+    @Published private(set) var isQuickCaptureInProgress = false
 
     private let configurationStore: CaptureConfigurationStore
     private let fileSystem: any CaptureFileSystem
     private let enumerator: any IntakeEnumerating
     private let mover: any CaptureMoving
+    private let quickCaptureWriter: any QuickCaptureWriting
+    private let now: () -> Date
     private let dashboardRefresh: () -> Void
     private var configuration: CaptureConfiguration?
 
@@ -35,6 +40,7 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
             fileSystem: LocalCaptureFileSystem(),
             enumerator: IntakeEnumerator(),
             mover: InboxCaptureService(fileSystem: LocalCaptureMutationFileSystem()),
+            quickCaptureWriter: QuickCaptureWriter(),
             dashboardRefresh: dashboardRefresh
         )
     }
@@ -44,12 +50,16 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
         fileSystem: any CaptureFileSystem,
         enumerator: any IntakeEnumerating = IntakeEnumerator(),
         mover: any CaptureMoving,
+        quickCaptureWriter: any QuickCaptureWriting = QuickCaptureWriter(),
+        now: @escaping () -> Date = Date.init,
         dashboardRefresh: @escaping () -> Void = {}
     ) {
         self.configurationStore = configurationStore
         self.fileSystem = fileSystem
         self.enumerator = enumerator
         self.mover = mover
+        self.quickCaptureWriter = quickCaptureWriter
+        self.now = now
         self.dashboardRefresh = dashboardRefresh
         refresh()
     }
@@ -58,6 +68,7 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
     var selectedItems: [IntakeItem] { items.filter { selectedItemIDs.contains($0.id) } }
     var selectedCount: Int { selectedItems.count }
     var canMove: Bool { configuration != nil && destinationProblem == nil && selectedCount > 0 && !isMoveInProgress }
+    var canQuickCapture: Bool { configuration != nil && destinationProblem == nil && QuickCaptureWriter.isValid(text: quickCaptureText) && !isQuickCaptureInProgress }
 
     func refresh() {
         isConfirmationPresented = false
@@ -126,6 +137,19 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
         dashboardRefresh()
     }
 
+    func submitQuickCapture() {
+        guard !isQuickCaptureInProgress, let configuration, canQuickCapture else { return }
+        isQuickCaptureInProgress = true
+        let result = quickCaptureWriter.create(text: quickCaptureText, configuration: configuration, now: now())
+        quickCaptureResult = result
+        isQuickCaptureInProgress = false
+        if case .success = result {
+            quickCaptureText = ""
+            refresh()
+            dashboardRefresh()
+        }
+    }
+
     private func reconcileSelection() {
         selectedItemIDs.formIntersection(Set(items.map(\.id)))
     }
@@ -157,6 +181,8 @@ struct EnterpriseInboxCaptureSheet: View {
                 resultSummary
                 intakeContent
                 controls
+                Divider()
+                quickCapture
             }
         }
         .padding()
@@ -239,6 +265,39 @@ struct EnterpriseInboxCaptureSheet: View {
             Button("Move to Enterprise Inbox") { viewModel.requestMoveConfirmation() }
                 .disabled(!viewModel.canMove)
                 .accessibilityLabel("Move selected items to Enterprise Inbox")
+        }
+    }
+
+    private var quickCapture: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Quick Capture").font(.headline)
+            Text("Create one new Markdown item in Enterprise Inbox.").font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $viewModel.quickCaptureText)
+                .frame(minHeight: 90)
+                .border(.separator)
+                .disabled(viewModel.isQuickCaptureInProgress)
+                .accessibilityLabel("Quick Capture text")
+            if !viewModel.quickCaptureText.isEmpty && !QuickCaptureWriter.isValid(text: viewModel.quickCaptureText) {
+                Text("Enter non-whitespace text to add an item.").font(.caption).foregroundStyle(.orange)
+            }
+            HStack {
+                Button("Add to Inbox") { viewModel.submitQuickCapture() }
+                    .disabled(!viewModel.canQuickCapture)
+                    .accessibilityLabel("Add Quick Capture text to Enterprise Inbox")
+                if let result = viewModel.quickCaptureResult {
+                    quickCaptureResult(result)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func quickCaptureResult(_ result: QuickCaptureResult) -> some View {
+        switch result {
+        case let .success(path):
+            Text("Added \(path.lastPathComponent) to Enterprise Inbox.").font(.caption).foregroundStyle(.green)
+        case let .failure(_, diagnostic):
+            Text(diagnostic).font(.caption).foregroundStyle(.orange)
         }
     }
 

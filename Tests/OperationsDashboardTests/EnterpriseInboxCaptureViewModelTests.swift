@@ -119,18 +119,59 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(mover.calls, 0)
     }
 
+    func testQuickCaptureRequiresExplicitValidTextAndSuccessClearsTextWithoutChangingSelection() throws {
+        let item = item(name: "selected.txt", sourceID: "icloud-downloads")
+        let writer = StubQuickCaptureWriter(result: .success(path: URL(fileURLWithPath: "/enterprise/Dashboard/Inbox/Quick Capture 2026-08-07 163245.md")))
+        var dashboardRefreshes = 0
+        let model = makeModel(
+            enumerator: StubEnumerator(results: [result(items: [item]), result(items: [item])]),
+            quickCaptureWriter: writer,
+            dashboardRefresh: { dashboardRefreshes += 1 }
+        )
+        model.toggleSelection(of: item)
+        model.quickCaptureText = " \n\t"
+        XCTAssertFalse(model.canQuickCapture)
+        model.submitQuickCapture()
+        XCTAssertEqual(writer.calls, 0)
+
+        model.quickCaptureText = "Capture this\nverbatim"
+        XCTAssertTrue(model.canQuickCapture)
+        model.submitQuickCapture()
+
+        XCTAssertEqual(writer.calls, 1)
+        XCTAssertEqual(writer.submittedText, "Capture this\nverbatim")
+        XCTAssertEqual(model.quickCaptureText, "")
+        XCTAssertEqual(model.selectedItemIDs, [item.id])
+        XCTAssertEqual(dashboardRefreshes, 1)
+    }
+
+    func testQuickCaptureFailurePreservesTextAndExposesResult() throws {
+        let failure = QuickCaptureResult.failure(.writeFailed, diagnostic: "Disk write failed.")
+        let writer = StubQuickCaptureWriter(result: failure)
+        let model = makeModel(results: [result(items: [])], quickCaptureWriter: writer)
+        model.quickCaptureText = "Keep this text"
+
+        model.submitQuickCapture()
+
+        XCTAssertEqual(writer.calls, 1)
+        XCTAssertEqual(model.quickCaptureText, "Keep this text")
+        XCTAssertEqual(model.quickCaptureResult, failure)
+    }
+
     private func makeModel(
         results: [IntakeEnumerationResult],
         fileSystem: any CaptureFileSystem = PermissiveCaptureFileSystem(),
-        mover: StubMover = StubMover(result: IntakeMoveBatchResult(results: []))
+        mover: StubMover = StubMover(result: IntakeMoveBatchResult(results: [])),
+        quickCaptureWriter: StubQuickCaptureWriter = StubQuickCaptureWriter(result: .failure(.writeFailed, diagnostic: "Unused"))
     ) -> EnterpriseInboxCaptureViewModel {
-        makeModel(enumerator: StubEnumerator(results: results), fileSystem: fileSystem, mover: mover)
+        makeModel(enumerator: StubEnumerator(results: results), fileSystem: fileSystem, mover: mover, quickCaptureWriter: quickCaptureWriter)
     }
 
     private func makeModel(
         enumerator: StubEnumerator,
         fileSystem: any CaptureFileSystem = PermissiveCaptureFileSystem(),
         mover: StubMover = StubMover(result: IntakeMoveBatchResult(results: [])),
+        quickCaptureWriter: StubQuickCaptureWriter = StubQuickCaptureWriter(result: .failure(.writeFailed, diagnostic: "Unused")),
         dashboardRefresh: @escaping () -> Void = {}
     ) -> EnterpriseInboxCaptureViewModel {
         let data = try! JSONEncoder().encode(configuration())
@@ -139,6 +180,8 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
             fileSystem: fileSystem,
             enumerator: enumerator,
             mover: mover,
+            quickCaptureWriter: quickCaptureWriter,
+            now: { Date(timeIntervalSince1970: 0) },
             dashboardRefresh: dashboardRefresh
         )
     }
@@ -199,6 +242,20 @@ private final class StubMover: CaptureMoving {
     func move(selected items: [IntakeItem], configuration: CaptureConfiguration) -> IntakeMoveBatchResult {
         calls += 1
         submittedItems = items
+        return result
+    }
+}
+
+private final class StubQuickCaptureWriter: QuickCaptureWriting {
+    let result: QuickCaptureResult
+    private(set) var calls = 0
+    private(set) var submittedText: String?
+
+    init(result: QuickCaptureResult) { self.result = result }
+
+    func create(text: String, configuration: CaptureConfiguration, now: Date) -> QuickCaptureResult {
+        calls += 1
+        submittedText = text
         return result
     }
 }
