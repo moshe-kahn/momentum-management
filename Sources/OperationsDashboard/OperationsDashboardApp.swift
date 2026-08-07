@@ -167,6 +167,7 @@ final class DashboardViewModel: ObservableObject {
 
 struct DashboardView: View {
     @ObservedObject var viewModel: DashboardViewModel
+    @State private var isShowingEnterpriseInboxCapture = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -177,6 +178,7 @@ struct DashboardView: View {
                 Button("Refresh") { viewModel.refresh() }
                     .disabled(viewModel.isShowingSetup)
                 if !viewModel.isShowingSetup {
+                    Button("Add Items") { isShowingEnterpriseInboxCapture = true }
                     Button("Configure Sources") { viewModel.reopenSetup() }
                 }
             }
@@ -207,6 +209,9 @@ struct DashboardView: View {
         }
         .padding()
         .frame(minWidth: 640, minHeight: 420)
+        .sheet(isPresented: $isShowingEnterpriseInboxCapture) {
+            EnterpriseInboxCaptureSheet(viewModel: EnterpriseInboxCaptureViewModel.live(dashboardRefresh: viewModel.refresh))
+        }
     }
 }
 
