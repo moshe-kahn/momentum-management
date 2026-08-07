@@ -177,6 +177,11 @@ protocol CaptureFileSystem {
     func isDirectory(at url: URL) throws -> Bool
     func isSymbolicLink(at url: URL) throws -> Bool
     func directoryEntries(at url: URL) throws -> [CaptureDirectoryEntry]
+    func entry(at url: URL) throws -> CaptureDirectoryEntry
+}
+
+protocol CaptureMutationFileSystem: CaptureFileSystem {
+    func moveItem(at source: URL, to destination: URL) throws
 }
 
 struct LocalCaptureFileSystem: CaptureFileSystem {
@@ -210,19 +215,36 @@ struct LocalCaptureFileSystem: CaptureFileSystem {
             .isSymbolicLinkKey,
             .fileResourceIdentifierKey
         ]
-        return try manager.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys), options: []).map { child in
-            let values = try child.resourceValues(forKeys: keys)
-            return CaptureDirectoryEntry(
-                url: child.standardizedFileURL,
-                name: child.lastPathComponent,
-                isRegularFile: values.isRegularFile == true,
-                isDirectory: values.isDirectory == true,
-                isPackage: values.isPackage == true,
-                isSymbolicLink: values.isSymbolicLink == true,
-                resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) }
-            )
-        }
+        return try manager.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys), options: []).map { try entry(at: $0) }
     }
+
+    func entry(at url: URL) throws -> CaptureDirectoryEntry {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey, .fileResourceIdentifierKey]
+        let values = try url.resourceValues(forKeys: keys)
+        return CaptureDirectoryEntry(
+            url: url.standardizedFileURL,
+            name: url.lastPathComponent,
+            isRegularFile: values.isRegularFile == true,
+            isDirectory: values.isDirectory == true,
+            isPackage: values.isPackage == true,
+            isSymbolicLink: values.isSymbolicLink == true,
+            resourceIdentifier: values.fileResourceIdentifier.map { String(describing: $0) }
+        )
+    }
+}
+
+struct LocalCaptureMutationFileSystem: CaptureMutationFileSystem {
+    private let reader = LocalCaptureFileSystem()
+    private let manager = FileManager.default
+
+    func exists(at url: URL) -> Bool { reader.exists(at: url) }
+    func isReadable(at url: URL) -> Bool { reader.isReadable(at: url) }
+    func isWritable(at url: URL) -> Bool { reader.isWritable(at: url) }
+    func isDirectory(at url: URL) throws -> Bool { try reader.isDirectory(at: url) }
+    func isSymbolicLink(at url: URL) throws -> Bool { try reader.isSymbolicLink(at: url) }
+    func directoryEntries(at url: URL) throws -> [CaptureDirectoryEntry] { try reader.directoryEntries(at: url) }
+    func entry(at url: URL) throws -> CaptureDirectoryEntry { try reader.entry(at: url) }
+    func moveItem(at source: URL, to destination: URL) throws { try manager.moveItem(at: source, to: destination) }
 }
 
 enum IntakeItemKind: String, Equatable, Sendable {
@@ -393,5 +415,159 @@ struct CaptureConfigurationValidator {
         let childComponents = child.standardizedFileURL.pathComponents
         guard childComponents.count > parentComponents.count else { return false }
         return zip(parentComponents, childComponents).allSatisfy(==)
+    }
+}
+
+enum IntakeMoveFailureCategory: Equatable, Sendable {
+    case sourceMissing
+    case sourceInvalid
+    case sourceOutsideApprovedRoot
+    case symlinkRejected
+    case destinationUnavailable
+    case destinationCollisionExhausted
+    case permissionDenied
+    case moveFailed
+    case configurationInvalid
+}
+
+enum IntakeMoveOutcome: Equatable, Sendable {
+    case moved(destination: URL)
+    case failed(category: IntakeMoveFailureCategory, diagnostic: String, attemptedDestination: URL?)
+}
+
+struct IntakeMoveResult: Equatable, Sendable {
+    let item: IntakeItem
+    let outcome: IntakeMoveOutcome
+}
+
+struct IntakeMoveBatchResult: Equatable, Sendable {
+    let results: [IntakeMoveResult]
+
+    var hasGlobalFailure: Bool {
+        guard let first = results.first else { return false }
+        guard case let .failed(category, _, _) = first.outcome else { return false }
+        return category == .configurationInvalid || category == .destinationUnavailable
+    }
+}
+
+struct InboxCaptureService {
+    static let maximumCollisionAttempts = 100
+    let fileSystem: any CaptureMutationFileSystem
+
+    func move(selected items: [IntakeItem], configuration: CaptureConfiguration) -> IntakeMoveBatchResult {
+        let validated: CaptureConfiguration
+        do {
+            validated = try configuration.validated()
+        } catch {
+            return globalFailure(items, category: .configurationInvalid, diagnostic: error.localizedDescription)
+        }
+
+        let destination = validated.enterpriseInboxURL.standardizedFileURL
+        guard isAvailableDestination(destination) else {
+            return globalFailure(items, category: .destinationUnavailable, diagnostic: "Enterprise Inbox destination is unavailable.")
+        }
+
+        return IntakeMoveBatchResult(results: items.map { move(item: $0, configuration: validated, destination: destination) })
+    }
+
+    private func move(item: IntakeItem, configuration: CaptureConfiguration, destination: URL) -> IntakeMoveResult {
+        guard let source = configuration.intakeSources.first(where: { $0.id == item.sourceID }) else {
+            return failure(item, .sourceInvalid, "Intake source ID is not configured.")
+        }
+        let root = source.rootURL.standardizedFileURL
+        guard item.sourceDisplayName == source.displayName, item.sourceRootURL.standardizedFileURL == root else {
+            return failure(item, .sourceInvalid, "Item source metadata does not match its configured intake source.")
+        }
+        let itemURL = item.itemURL.standardizedFileURL
+        guard itemURL.deletingLastPathComponent() == root else {
+            return failure(item, .sourceOutsideApprovedRoot, "Item is not an immediate child of its configured intake root.")
+        }
+        guard !item.displayName.hasPrefix("."), itemURL.lastPathComponent == item.displayName else {
+            return failure(item, .sourceInvalid, "Item name is no longer valid for intake.")
+        }
+        guard fileSystem.exists(at: itemURL) else {
+            return failure(item, .sourceMissing, "Selected intake item no longer exists.")
+        }
+
+        let current: CaptureDirectoryEntry
+        do {
+            guard fileSystem.exists(at: root), fileSystem.isReadable(at: root), try fileSystem.isDirectory(at: root), !(try fileSystem.isSymbolicLink(at: root)) else {
+                return failure(item, .sourceInvalid, "Configured intake source is unavailable.")
+            }
+            current = try fileSystem.entry(at: itemURL)
+        } catch {
+            return failure(item, .sourceInvalid, error.localizedDescription)
+        }
+        guard !current.isSymbolicLink else {
+            return failure(item, .symlinkRejected, "Symbolic links cannot be moved through Enterprise Inbox Capture.")
+        }
+        guard let currentKind = itemKind(for: current), currentKind == item.kind else {
+            return failure(item, .sourceInvalid, "Selected intake item changed type or is unsupported.")
+        }
+        guard item.resourceIdentifier == nil || current.resourceIdentifier == item.resourceIdentifier else {
+            return failure(item, .sourceInvalid, "Selected intake item identity changed after enumeration.")
+        }
+        guard isAvailableDestination(destination) else {
+            return failure(item, .destinationUnavailable, "Enterprise Inbox destination is unavailable.")
+        }
+
+        for suffix in 1...Self.maximumCollisionAttempts {
+            let candidate = collisionDestination(for: current.name, kind: currentKind, suffix: suffix, in: destination)
+            guard !fileSystem.exists(at: candidate) else { continue }
+            do {
+                try fileSystem.moveItem(at: itemURL, to: candidate)
+                return IntakeMoveResult(item: item, outcome: .moved(destination: candidate))
+            } catch {
+                if fileSystem.exists(at: candidate) { continue }
+                return failure(item, error.isPermissionError ? .permissionDenied : .moveFailed, error.localizedDescription, attemptedDestination: candidate)
+            }
+        }
+        return failure(item, .destinationCollisionExhausted, "No collision-safe Enterprise Inbox destination name was available.")
+    }
+
+    private func globalFailure(_ items: [IntakeItem], category: IntakeMoveFailureCategory, diagnostic: String) -> IntakeMoveBatchResult {
+        IntakeMoveBatchResult(results: items.map { failure($0, category, diagnostic) })
+    }
+
+    private func failure(
+        _ item: IntakeItem,
+        _ category: IntakeMoveFailureCategory,
+        _ diagnostic: String,
+        attemptedDestination: URL? = nil
+    ) -> IntakeMoveResult {
+        IntakeMoveResult(item: item, outcome: .failed(category: category, diagnostic: diagnostic, attemptedDestination: attemptedDestination))
+    }
+
+    private func isAvailableDestination(_ url: URL) -> Bool {
+        guard fileSystem.exists(at: url), fileSystem.isReadable(at: url), fileSystem.isWritable(at: url) else { return false }
+        do {
+            return try fileSystem.isDirectory(at: url) && !(try fileSystem.isSymbolicLink(at: url))
+        } catch {
+            return false
+        }
+    }
+
+    private func itemKind(for entry: CaptureDirectoryEntry) -> IntakeItemKind? {
+        if entry.isPackage && entry.isDirectory { return .package }
+        if entry.isDirectory { return .directory }
+        if entry.isRegularFile { return .file }
+        return nil
+    }
+
+    private func collisionDestination(for name: String, kind: IntakeItemKind, suffix: Int, in destination: URL) -> URL {
+        guard suffix > 1 else { return destination.appending(path: name, directoryHint: kind == .file ? .notDirectory : .isDirectory) }
+        guard kind == .file, let dot = name.lastIndex(of: "."), dot != name.startIndex else {
+            return destination.appending(path: "\(name) (\(suffix))", directoryHint: .isDirectory)
+        }
+        let stem = String(name[..<dot])
+        let extensionPart = String(name[dot...])
+        return destination.appending(path: "\(stem) (\(suffix))\(extensionPart)", directoryHint: .notDirectory)
+    }
+}
+
+private extension Error {
+    var isPermissionError: Bool {
+        let nsError = self as NSError
+        return nsError.domain == NSCocoaErrorDomain && [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(nsError.code)
     }
 }

@@ -176,6 +176,13 @@ private struct StubCaptureFileSystem: CaptureFileSystem {
         return entries.first(where: { standardizedPath($0.key) == standardizedPath(url) })?.value ?? []
     }
 
+    func entry(at url: URL) throws -> CaptureDirectoryEntry {
+        guard let entry = entries.values.flatMap({ $0 }).first(where: { standardizedPath($0.url) == standardizedPath(url) }) else {
+            throw StubCaptureError.enumeration
+        }
+        return entry
+    }
+
     private func contains(_ urls: Set<URL>, _ url: URL) -> Bool {
         urls.contains { standardizedPath($0) == standardizedPath(url) }
     }
