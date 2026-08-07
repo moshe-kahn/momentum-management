@@ -1,0 +1,16 @@
+{
+  "schemaVersion" : 1,
+  "intakeSources" : [
+    {
+      "id" : "icloud-downloads",
+      "displayName" : "iCloud Drive Downloads",
+      "rootPath" : "<runtime-only>"
+    },
+    {
+      "id" : "kahntra-downloads",
+      "displayName" : "Kahntra Downloads",
+      "rootPath" : "<runtime-only>"
+    }
+  ],
+  "enterpriseInboxPath" : "<runtime-only>"
+}
