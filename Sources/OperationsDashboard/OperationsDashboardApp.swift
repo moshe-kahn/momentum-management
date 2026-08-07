@@ -7,6 +7,7 @@ struct OperationsDashboardApp: App {
         WindowGroup("Operations Dashboard") {
             DashboardView(viewModel: DashboardViewModel.live())
         }
+        .windowResizability(.contentMinSize)
     }
 }
 
@@ -227,9 +228,26 @@ private struct ProductOverviewRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(ProductSelectionAccessibility.label(for: product.product))
+        .accessibilityHint(ProductSelectionAccessibility.hint)
+        .accessibilityValue(ProductSelectionAccessibility.value(isSelected: isSelected))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
         .listRowBackground(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+    }
+}
+
+enum ProductSelectionAccessibility {
+    static let hint = "Activates this row to select the product."
+
+    static func label(for product: ConfiguredProduct) -> String {
+        product.displayName
+    }
+
+    static func value(isSelected: Bool) -> String {
+        isSelected ? "Selected" : "Not selected"
     }
 }
 
@@ -256,27 +274,30 @@ private struct SelectedProductDetailView: View {
     }()
 
     var body: some View {
-        GroupBox("Selected product") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(product.product.displayName).font(.headline)
-                Text(product.issues.isEmpty ? "Sources: Available" : "Sources: Warning")
-            Text(product.inboxCount.map { "Inbox: \($0)" } ?? "Inbox unavailable")
-            if let status = product.status {
-                Text("Status: \(status.currentStatus)")
-                    Text("Declared Last updated: \(Self.declaredDateFormatter.string(from: status.lastUpdated))")
-                list("Next actions", items: status.nextActions)
-                list("Blockers", items: status.blockers)
-            } else {
-                Text("Status unavailable")
-            }
-                Text("Status record file modified: \(metadataDate)")
-                sourceRoles
-            if !product.issues.isEmpty {
-                Text(product.issues.map(\.message).joined(separator: " · "))
-                    .foregroundStyle(.orange)
-            }
+        ScrollView(.vertical) {
+            GroupBox("Selected product") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(product.product.displayName).font(.headline)
+                    Text(product.issues.isEmpty ? "Sources: Available" : "Sources: Warning")
+                    Text(product.inboxCount.map { "Inbox: \($0)" } ?? "Inbox unavailable")
+                    if let status = product.status {
+                        Text("Status: \(status.currentStatus)")
+                        Text("Declared Last updated: \(Self.declaredDateFormatter.string(from: status.lastUpdated))")
+                        list("Next actions", items: status.nextActions)
+                        list("Blockers", items: status.blockers)
+                    } else {
+                        Text("Status unavailable")
+                    }
+                    Text("Status record file modified: \(metadataDate)")
+                    sourceRoles
+                    if !product.issues.isEmpty {
+                        Text(product.issues.map(\.message).joined(separator: " · "))
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var metadataDate: String {

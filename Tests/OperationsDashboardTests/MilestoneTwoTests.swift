@@ -59,6 +59,15 @@ final class MilestoneTwoTests: XCTestCase {
         XCTAssertEqual(SourceAction.allCases.map(\.roleLabel), ["Product root", "Inbox", "Status record"])
     }
 
+    func testProductSelectionAccessibilityDescribesSelectionState() throws {
+        let product = try XCTUnwrap(try makeViewModel().products.first).product
+
+        XCTAssertEqual(ProductSelectionAccessibility.label(for: product), "Synthetic Primary")
+        XCTAssertEqual(ProductSelectionAccessibility.hint, "Activates this row to select the product.")
+        XCTAssertEqual(ProductSelectionAccessibility.value(isSelected: true), "Selected")
+        XCTAssertEqual(ProductSelectionAccessibility.value(isSelected: false), "Not selected")
+    }
+
     func testStatusRecordModificationMetadataIsDistinctFromDeclaredDate() throws {
         let configuration = try configuration()
         let fileSystem = MetadataFileSystem()
