@@ -70,6 +70,8 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(enumerator.calls, 2)
         XCTAssertEqual(dashboardRefreshes, 1)
         XCTAssertTrue(model.selectedItemIDs.isEmpty)
+        XCTAssertEqual(model.sessionResults.map(\.title), ["Moved first.txt"])
+        XCTAssertEqual(model.sessionResults.first?.isCurrent, true)
     }
 
     func testPartialFailureKeepsFailedVisibleItemSelected() throws {
@@ -143,6 +145,8 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(model.quickCaptureText, "")
         XCTAssertEqual(model.selectedItemIDs, [item.id])
         XCTAssertEqual(dashboardRefreshes, 1)
+        XCTAssertEqual(model.sessionResults.first?.title, "Added Quick Capture 2026-08-07 163245.md")
+        XCTAssertEqual(model.sessionResults.first?.isCurrent, true)
     }
 
     func testQuickCaptureFailurePreservesTextAndExposesResult() throws {
@@ -156,6 +160,21 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(writer.calls, 1)
         XCTAssertEqual(model.quickCaptureText, "Keep this text")
         XCTAssertEqual(model.quickCaptureResult, failure)
+    }
+
+    func testNewUserInteractionDeemphasizesSessionResultsWithoutRemovingThem() throws {
+        let item = item(name: "selected.txt", sourceID: "icloud-downloads")
+        let writer = StubQuickCaptureWriter(result: .success(path: URL(fileURLWithPath: "/enterprise/Dashboard/Inbox/Quick Capture 2026-08-07 163245.md")))
+        let model = makeModel(results: [result(items: [item])], quickCaptureWriter: writer)
+        model.quickCaptureText = "Capture this"
+        model.submitQuickCapture()
+
+        model.toggleSelection(of: item)
+
+        XCTAssertEqual(model.sessionResults.count, 1)
+        XCTAssertEqual(model.sessionResults.first?.isCurrent, false)
+        XCTAssertEqual(model.successfulSessionResultCount, 1)
+        XCTAssertEqual(model.failedSessionResultCount, 0)
     }
 
     private func makeModel(

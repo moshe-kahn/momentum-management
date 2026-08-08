@@ -12,6 +12,25 @@ protocol CaptureMoving {
 
 extension InboxCaptureService: CaptureMoving {}
 
+struct CaptureSessionResult: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let succeeded: Bool
+    var isCurrent: Bool
+}
+
+struct CaptureSessionBatch: Identifiable, Equatable {
+    let id = UUID()
+    let completedAt: Date
+    var results: [CaptureSessionResult]
+
+    var summary: String {
+        let passed = results.filter(\.succeeded).count
+        let failed = results.count - passed
+        return "\(passed) passed · \(failed) failed"
+    }
+}
+
 @MainActor
 final class EnterpriseInboxCaptureViewModel: ObservableObject {
     @Published private(set) var enumeration: IntakeEnumerationResult?
@@ -24,6 +43,7 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
     @Published var quickCaptureText = ""
     @Published private(set) var quickCaptureResult: QuickCaptureResult?
     @Published private(set) var isQuickCaptureInProgress = false
+    @Published private(set) var sessionBatches: [CaptureSessionBatch] = []
 
     private let configurationStore: CaptureConfigurationStore
     private let fileSystem: any CaptureFileSystem
@@ -69,8 +89,29 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
     var selectedCount: Int { selectedItems.count }
     var canMove: Bool { configuration != nil && destinationProblem == nil && selectedCount > 0 && !isMoveInProgress }
     var canQuickCapture: Bool { configuration != nil && destinationProblem == nil && QuickCaptureWriter.isValid(text: quickCaptureText) && !isQuickCaptureInProgress }
+    var sessionResults: [CaptureSessionResult] { sessionBatches.flatMap(\.results) }
+    var successfulSessionResultCount: Int { sessionResults.filter(\.succeeded).count }
+    var failedSessionResultCount: Int { sessionResults.count - successfulSessionResultCount }
 
     func refresh() {
+        deemphasizeSessionResults()
+        reload()
+    }
+
+    func deemphasizeSessionResults() {
+        for batchIndex in sessionBatches.indices {
+            for resultIndex in sessionBatches[batchIndex].results.indices {
+                sessionBatches[batchIndex].results[resultIndex].isCurrent = false
+            }
+        }
+    }
+
+    func updateQuickCaptureText(_ text: String) {
+        quickCaptureText = text
+        deemphasizeSessionResults()
+    }
+
+    private func reload() {
         isConfirmationPresented = false
         configurationProblem = nil
         destinationProblem = nil
@@ -101,6 +142,7 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
 
     func toggleSelection(of item: IntakeItem) {
         guard items.contains(item) else { return }
+        deemphasizeSessionResults()
         if selectedItemIDs.contains(item.id) {
             selectedItemIDs.remove(item.id)
         } else {
@@ -109,10 +151,12 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
     }
 
     func selectAll() {
+        deemphasizeSessionResults()
         selectedItemIDs = Set(items.map(\.id))
     }
 
     func clearSelection() {
+        deemphasizeSessionResults()
         selectedItemIDs = []
     }
 
@@ -132,8 +176,9 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
         isConfirmationPresented = false
         let result = mover.move(selected: submittedItems, configuration: configuration)
         moveResult = result
+        appendMoveResults(result)
         isMoveInProgress = false
-        refresh()
+        reload()
         dashboardRefresh()
     }
 
@@ -142,51 +187,94 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
         isQuickCaptureInProgress = true
         let result = quickCaptureWriter.create(text: quickCaptureText, configuration: configuration, now: now())
         quickCaptureResult = result
-        isQuickCaptureInProgress = false
+        appendQuickCaptureResult(result)
         if case .success = result {
             quickCaptureText = ""
-            refresh()
+            reload()
             dashboardRefresh()
         }
+        isQuickCaptureInProgress = false
     }
 
     private func reconcileSelection() {
         selectedItemIDs.formIntersection(Set(items.map(\.id)))
     }
+
+    private func appendMoveResults(_ batch: IntakeMoveBatchResult) {
+        appendSessionResults(batch.results.map { result in
+            switch result.outcome {
+            case .moved:
+                CaptureSessionResult(title: "Moved \(result.item.displayName)", succeeded: true, isCurrent: true)
+            case let .failed(_, diagnostic, _):
+                CaptureSessionResult(title: "Did not move \(result.item.displayName): \(diagnostic)", succeeded: false, isCurrent: true)
+            }
+        })
+    }
+
+    private func appendQuickCaptureResult(_ result: QuickCaptureResult) {
+        let sessionResult: CaptureSessionResult
+        switch result {
+        case let .success(path):
+            sessionResult = CaptureSessionResult(title: "Added \(path.lastPathComponent)", succeeded: true, isCurrent: true)
+        case let .failure(_, diagnostic):
+            sessionResult = CaptureSessionResult(title: "Quick Capture failed: \(diagnostic)", succeeded: false, isCurrent: true)
+        }
+        appendSessionResults([sessionResult])
+    }
+
+    private func appendSessionResults(_ results: [CaptureSessionResult]) {
+        deemphasizeSessionResults()
+        sessionBatches.insert(CaptureSessionBatch(completedAt: now(), results: results), at: 0)
+    }
 }
 
 struct EnterpriseInboxCaptureSheet: View {
-    @ObservedObject var viewModel: EnterpriseInboxCaptureViewModel
+    @StateObject private var viewModel: EnterpriseInboxCaptureViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var workspace: CaptureWorkspace = .addItems
+
+    init(dashboardRefresh: @escaping () -> Void) {
+        _viewModel = StateObject(wrappedValue: EnterpriseInboxCaptureViewModel.live(dashboardRefresh: dashboardRefresh))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Add Items").font(.title2)
-                    Text("Select items to move into Enterprise Inbox.").foregroundStyle(.secondary)
+                    Text("Enterprise Inbox").font(.title2)
+                    Text("Move selected intake items or create a Quick Capture note.").foregroundStyle(.secondary)
                 }
-                Spacer()
-                Button("Refresh") { viewModel.refresh() }
-                    .disabled(viewModel.isMoveInProgress)
-                    .accessibilityLabel("Refresh intake items")
             }
 
             if let problem = viewModel.configurationProblem {
                 ContentUnavailableView("Capture configuration unavailable", systemImage: "exclamationmark.triangle", description: Text(problem))
             } else {
-                sourceAvailability
+                Picker("Capture mode", selection: $workspace) {
+                    ForEach(CaptureWorkspace.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Capture mode")
+                .onChange(of: workspace) { _, _ in viewModel.deemphasizeSessionResults() }
+
                 if let destinationProblem = viewModel.destinationProblem {
                     Text(destinationProblem).foregroundStyle(.orange)
                 }
-                resultSummary
-                intakeContent
-                controls
+
+                workspaceContent
+                    .frame(height: 330, alignment: .top)
                 Divider()
-                quickCapture
+                results
+                    .frame(height: 150, alignment: .top)
+                HStack {
+                    Spacer()
+                    Button("Done") { dismiss() }
+                        .disabled(viewModel.isMoveInProgress || viewModel.isQuickCaptureInProgress)
+                        .accessibilityLabel("Close Enterprise Inbox")
+                }
             }
         }
         .padding()
-        .frame(minWidth: 620, minHeight: 440)
+        .frame(minWidth: 680, minHeight: 650)
         .confirmationDialog(
             "Move \(viewModel.selectedCount) item\(viewModel.selectedCount == 1 ? "" : "s") to Enterprise Inbox?",
             isPresented: $viewModel.isConfirmationPresented,
@@ -199,32 +287,39 @@ struct EnterpriseInboxCaptureSheet: View {
         }
     }
 
+    @ViewBuilder
+    private var workspaceContent: some View {
+        switch workspace {
+        case .addItems:
+            addItemsWorkspace
+        case .quickCapture:
+            quickCaptureWorkspace
+        }
+    }
+
+    private var addItemsWorkspace: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sourceAvailability
+            intakeContent
+                .frame(maxHeight: .infinity)
+            controls
+        }
+    }
+
     private var sourceAvailability: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text("Intake sources").font(.headline)
+            HStack {
+                Text("Intake sources").font(.headline)
+                Spacer()
+                Button("Refresh") { viewModel.refresh() }
+                    .disabled(viewModel.isMoveInProgress)
+                    .accessibilityLabel("Refresh intake items")
+            }
             ForEach(viewModel.enumeration?.sources ?? [], id: \.source.id) { source in
                 Text("\(source.source.displayName): \(availabilityText(source.availability))")
                     .accessibilityLabel("\(source.source.displayName), \(availabilityText(source.availability))")
                     .foregroundStyle(isUnavailable(source.availability) ? .orange : .secondary)
             }
-        }
-    }
-
-    @ViewBuilder
-    private var resultSummary: some View {
-        if let result = viewModel.moveResult {
-            let moved = result.results.filter { if case .moved = $0.outcome { return true }; return false }.count
-            let failures = result.results.compactMap { item -> String? in
-                guard case let .failed(_, diagnostic, _) = item.outcome else { return nil }
-                return "\(item.item.displayName): \(diagnostic)"
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Move result: \(moved) moved, \(failures.count) failed.")
-                    .font(.subheadline.weight(.semibold))
-                ForEach(failures, id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
-            }
-            .padding(8)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
         }
     }
 
@@ -268,13 +363,17 @@ struct EnterpriseInboxCaptureSheet: View {
         }
     }
 
-    private var quickCapture: some View {
+    private var quickCaptureWorkspace: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Quick Capture").font(.headline)
             Text("Create one new Markdown item in Enterprise Inbox.").font(.caption).foregroundStyle(.secondary)
-            TextEditor(text: $viewModel.quickCaptureText)
-                .frame(minHeight: 90)
-                .border(.separator)
+            TextEditor(text: Binding(
+                get: { viewModel.quickCaptureText },
+                set: { viewModel.updateQuickCaptureText($0) }
+            ))
+                .frame(maxHeight: .infinity)
+                .padding(8)
+                .overlay { Rectangle().stroke(.separator) }
                 .disabled(viewModel.isQuickCaptureInProgress)
                 .accessibilityLabel("Quick Capture text")
             if !viewModel.quickCaptureText.isEmpty && !QuickCaptureWriter.isValid(text: viewModel.quickCaptureText) {
@@ -284,21 +383,54 @@ struct EnterpriseInboxCaptureSheet: View {
                 Button("Add to Inbox") { viewModel.submitQuickCapture() }
                     .disabled(!viewModel.canQuickCapture)
                     .accessibilityLabel("Add Quick Capture text to Enterprise Inbox")
-                if let result = viewModel.quickCaptureResult {
-                    quickCaptureResult(result)
-                }
             }
         }
     }
 
-    @ViewBuilder
-    private func quickCaptureResult(_ result: QuickCaptureResult) -> some View {
-        switch result {
-        case let .success(path):
-            Text("Added \(path.lastPathComponent) to Enterprise Inbox.").font(.caption).foregroundStyle(.green)
-        case let .failure(_, diagnostic):
-            Text(diagnostic).font(.caption).foregroundStyle(.orange)
+    private var results: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text("Results").font(.headline)
+                Spacer()
+                Text("\(viewModel.successfulSessionResultCount) passed · \(viewModel.failedSessionResultCount) failed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if viewModel.sessionResults.isEmpty {
+                Text("No actions this session.").font(.caption).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.sessionBatches) { batch in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(batch.completedAt, format: .dateTime.hour().minute().second())
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Divider()
+                                    Text(batch.summary)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                ForEach(batch.results) { result in
+                                    Text(result.title)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(resultColor(result))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                }
+                .accessibilityLabel("Session results")
+            }
         }
+    }
+
+    private func resultColor(_ result: CaptureSessionResult) -> Color {
+        guard result.isCurrent else { return .secondary }
+        return result.succeeded ? .green : .red
     }
 
     private func availabilityText(_ availability: IntakeSourceAvailability) -> String {
@@ -314,6 +446,19 @@ struct EnterpriseInboxCaptureSheet: View {
         switch availability {
         case .missing, .unreadable: true
         case .available, .empty: false
+        }
+    }
+}
+
+private enum CaptureWorkspace: String, CaseIterable, Identifiable {
+    case addItems
+    case quickCapture
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .addItems: "Add Items"
+        case .quickCapture: "Quick Capture"
         }
     }
 }

@@ -3,6 +3,13 @@ import SwiftUI
 
 @main
 struct OperationsDashboardApp: App {
+    init() {
+        NSApplication.shared.setActivationPolicy(.regular)
+        DispatchQueue.main.async {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
+
     var body: some Scene {
         WindowGroup("Operations Dashboard") {
             DashboardView(viewModel: DashboardViewModel.live())
@@ -210,7 +217,7 @@ struct DashboardView: View {
         .padding()
         .frame(minWidth: 640, minHeight: 420)
         .sheet(isPresented: $isShowingEnterpriseInboxCapture) {
-            EnterpriseInboxCaptureSheet(viewModel: EnterpriseInboxCaptureViewModel.live(dashboardRefresh: viewModel.refresh))
+            EnterpriseInboxCaptureSheet(dashboardRefresh: viewModel.refresh)
         }
     }
 }
