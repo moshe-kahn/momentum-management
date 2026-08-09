@@ -66,6 +66,7 @@ final class EnterpriseInboxCaptureTests: XCTestCase {
         try fixture.write("hidden", at: fixture.first.appending(path: ".hidden"))
         try FileManager.default.createDirectory(at: fixture.first.appending(path: "Folder"), withIntermediateDirectories: false)
         try fixture.write("nested", at: fixture.first.appending(path: "Folder/nested.txt"))
+        try FileManager.default.createDirectory(at: fixture.first.appending(path: PreparedItemsEnumerator.folderName), withIntermediateDirectories: false)
         try FileManager.default.createDirectory(at: fixture.first.appending(path: ".hidden-folder"), withIntermediateDirectories: false)
         try FileManager.default.createSymbolicLink(at: fixture.first.appending(path: "linked.txt"), withDestinationURL: fixture.first.appending(path: "a.txt"))
 
@@ -79,7 +80,7 @@ final class EnterpriseInboxCaptureTests: XCTestCase {
         XCTAssertEqual(result.items.filter { $0.displayName == "same.txt" }.map(\.sourceID), ["icloud-downloads", "kahntra-downloads"])
         XCTAssertEqual(Set(result.items.filter { $0.displayName == "same.txt" }.map(\.id)).count, 2)
         XCTAssertEqual(result.items.first { $0.displayName == "Folder" }?.kind, .directory)
-        XCTAssertFalse(result.items.contains { $0.displayName == ".hidden" || $0.displayName == ".hidden-folder" || $0.displayName == "linked.txt" || $0.displayName == "nested.txt" })
+        XCTAssertFalse(result.items.contains { $0.displayName == ".hidden" || $0.displayName == ".hidden-folder" || $0.displayName == "linked.txt" || $0.displayName == "nested.txt" || $0.displayName == PreparedItemsEnumerator.folderName })
     }
 
     func testEnumeratorRepresentsEmptyMissingAndUnreadableSourcesIndependently() throws {
@@ -108,6 +109,55 @@ final class EnterpriseInboxCaptureTests: XCTestCase {
 
         XCTAssertEqual(result.items.map(\.kind), [.package, .file])
         XCTAssertEqual(result.items.map(\.displayName), ["Example.app", "Reference alias"])
+    }
+
+    func testPreparedItemsEnumeratorDerivesFoldersAndEnumeratesOnlyDirectEligibleChildren() throws {
+        let fixture = try TemporaryCaptureFixture()
+        let firstPrepared = fixture.first.appending(path: PreparedItemsEnumerator.folderName, directoryHint: .isDirectory)
+        let secondPrepared = fixture.second.appending(path: PreparedItemsEnumerator.folderName, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: firstPrepared, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: secondPrepared, withIntermediateDirectories: false)
+        try fixture.write("first", at: firstPrepared.appending(path: "first.txt"))
+        try fixture.write("hidden", at: firstPrepared.appending(path: ".hidden.txt"))
+        try FileManager.default.createDirectory(at: firstPrepared.appending(path: "Folder"), withIntermediateDirectories: false)
+        try fixture.write("nested", at: firstPrepared.appending(path: "Folder/nested.txt"))
+        try fixture.write("second", at: secondPrepared.appending(path: "second.txt"))
+        try FileManager.default.createSymbolicLink(at: secondPrepared.appending(path: "linked.txt"), withDestinationURL: secondPrepared.appending(path: "second.txt"))
+
+        let before = try fixture.directNames(at: firstPrepared) + fixture.directNames(at: secondPrepared)
+        let result = try PreparedItemsEnumerator().enumerate(configuration: fixture.configuration, fileSystem: LocalCaptureFileSystem())
+        let after = try fixture.directNames(at: firstPrepared) + fixture.directNames(at: secondPrepared)
+
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(result.folders.map(\.folder.folderURL), [firstPrepared.standardizedFileURL, secondPrepared.standardizedFileURL])
+        XCTAssertEqual(result.folders.map(\.availability), [.available, .available])
+        XCTAssertEqual(result.items.map(\.displayName), ["first.txt", "Folder", "second.txt"])
+        XCTAssertEqual(result.items.map(\.sourceID), ["icloud-downloads", "icloud-downloads", "kahntra-downloads"])
+        XCTAssertFalse(result.items.contains { $0.displayName == ".hidden.txt" || $0.displayName == "linked.txt" || $0.displayName == "nested.txt" })
+    }
+
+    func testPreparedItemsEnumeratorKeepsAvailableFolderUsefulWhenOtherFolderIsMissing() throws {
+        let first = URL(fileURLWithPath: "/capture/icloud")
+        let second = URL(fileURLWithPath: "/capture/kahntra")
+        let secondPrepared = second.appending(path: PreparedItemsEnumerator.folderName, directoryHint: .isDirectory)
+        let destination = URL(fileURLWithPath: "/enterprise/Dashboard/Inbox")
+        let fileSystem = StubCaptureFileSystem(
+            existing: [first, second, secondPrepared, destination],
+            readable: [first, second, secondPrepared, destination],
+            writable: [destination],
+            directories: [first, second, secondPrepared, destination],
+            symbolicLinks: [],
+            entries: [secondPrepared: [entry("ready.txt", in: secondPrepared, regular: true)]]
+        )
+
+        let result = try PreparedItemsEnumerator().enumerate(
+            configuration: makeConfiguration(first: first.path, second: second.path, destination: destination.path),
+            fileSystem: fileSystem
+        )
+
+        XCTAssertEqual(result.folders.map(\.availability), [.missing, .available])
+        XCTAssertEqual(result.items.map(\.displayName), ["ready.txt"])
+        XCTAssertEqual(result.items.first?.preparedFolderURL, secondPrepared.standardizedFileURL)
     }
 
     private func makeConfiguration(
@@ -237,5 +287,9 @@ private final class TemporaryCaptureFixture {
         try [first, second, destination].map {
             try FileManager.default.contentsOfDirectory(atPath: $0.path).sorted()
         }
+    }
+
+    func directNames(at url: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: url.path).sorted()
     }
 }

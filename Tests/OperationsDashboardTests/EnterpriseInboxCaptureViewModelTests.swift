@@ -192,6 +192,33 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(model.failedSessionResultCount, 0)
     }
 
+    func testPreparedItemsRequireConfirmationThenUseDedicatedMoveBoundaryAndResults() throws {
+        let prepared = preparedItem(name: "ready.txt", sourceID: "icloud-downloads")
+        let preparedEnumerator = StubPreparedEnumerator(results: [preparedResult(items: [prepared]), preparedResult(items: [])])
+        let preparedMover = StubPreparedMover(result: PreparedItemMoveBatchResult(results: [
+            PreparedItemMoveResult(item: prepared, outcome: .moved(destination: URL(fileURLWithPath: "/enterprise/Dashboard/Inbox/ready.txt")))
+        ]))
+        let model = makeModel(
+            enumerator: StubEnumerator(results: [result(items: []), result(items: [])]),
+            preparedEnumerator: preparedEnumerator,
+            preparedMover: preparedMover
+        )
+
+        XCTAssertEqual(model.preparedItems, [prepared])
+        XCTAssertTrue(model.canMovePrepared)
+        model.requestPreparedMoveConfirmation()
+        XCTAssertTrue(model.isPreparedConfirmationPresented)
+        XCTAssertEqual(preparedMover.calls, 0)
+
+        model.confirmPreparedMove()
+
+        XCTAssertEqual(preparedMover.calls, 1)
+        XCTAssertEqual(preparedMover.submittedItems, [prepared])
+        XCTAssertEqual(model.preparedItems, [])
+        XCTAssertEqual(model.sessionResults.first?.title, "Moved ready.txt")
+        XCTAssertEqual(model.sessionResults.first?.isCurrent, true)
+    }
+
     private func makeModel(
         results: [IntakeEnumerationResult],
         fileSystem: any CaptureFileSystem = PermissiveCaptureFileSystem(),
@@ -205,6 +232,8 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         enumerator: StubEnumerator,
         fileSystem: any CaptureFileSystem = PermissiveCaptureFileSystem(),
         mover: StubMover = StubMover(result: IntakeMoveBatchResult(results: [])),
+        preparedEnumerator: StubPreparedEnumerator = StubPreparedEnumerator(results: [PreparedItemsEnumerationResult(folders: [], items: [])]),
+        preparedMover: StubPreparedMover = StubPreparedMover(result: PreparedItemMoveBatchResult(results: [])),
         quickCaptureWriter: StubQuickCaptureWriter = StubQuickCaptureWriter(result: .failure(.writeFailed, diagnostic: "Unused")),
         dashboardRefresh: @escaping () -> Void = {}
     ) -> EnterpriseInboxCaptureViewModel {
@@ -214,6 +243,8 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
             fileSystem: fileSystem,
             enumerator: enumerator,
             mover: mover,
+            preparedEnumerator: preparedEnumerator,
+            preparedMover: preparedMover,
             quickCaptureWriter: quickCaptureWriter,
             now: { Date(timeIntervalSince1970: 0) },
             dashboardRefresh: dashboardRefresh
@@ -245,6 +276,29 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
             : IntakeSource(id: sourceID, displayName: "Kahntra Downloads", rootPath: "/capture/kahntra")
         return IntakeItem(sourceID: source.id, sourceDisplayName: source.displayName, sourceRootURL: source.rootURL, itemURL: source.rootURL.appending(path: name), displayName: name, kind: .file, resourceIdentifier: "\(sourceID)-\(name)")
     }
+
+    private func preparedItem(name: String, sourceID: String) -> PreparedIntakeItem {
+        let source = sourceID == "icloud-downloads"
+            ? IntakeSource(id: sourceID, displayName: "iCloud Drive Downloads", rootPath: "/capture/icloud")
+            : IntakeSource(id: sourceID, displayName: "Kahntra Downloads", rootPath: "/capture/kahntra")
+        let folder = source.rootURL.appending(path: PreparedItemsEnumerator.folderName, directoryHint: .isDirectory)
+        return PreparedIntakeItem(sourceID: source.id, sourceDisplayName: source.displayName, preparedFolderURL: folder, itemURL: folder.appending(path: name), displayName: name, kind: .file, resourceIdentifier: "\(sourceID)-\(name)")
+    }
+
+    private func preparedResult(
+        items: [PreparedIntakeItem],
+        firstAvailability: IntakeSourceAvailability = .available,
+        secondAvailability: IntakeSourceAvailability = .available
+    ) -> PreparedItemsEnumerationResult {
+        let configuration = configuration()
+        let folders = configuration.intakeSources.map { source in
+            PreparedIntakeFolder(source: source, folderURL: source.rootURL.appending(path: PreparedItemsEnumerator.folderName, directoryHint: .isDirectory))
+        }
+        return PreparedItemsEnumerationResult(folders: [
+            PreparedFolderEnumeration(folder: folders[0], availability: firstAvailability, items: items.filter { $0.sourceID == "icloud-downloads" }),
+            PreparedFolderEnumeration(folder: folders[1], availability: secondAvailability, items: items.filter { $0.sourceID == "kahntra-downloads" })
+        ], items: items)
+    }
 }
 
 private final class MemoryStorage: CaptureConfigurationStorage {
@@ -274,6 +328,32 @@ private final class StubMover: CaptureMoving {
     init(result: IntakeMoveBatchResult) { self.result = result }
 
     func move(selected items: [IntakeItem], configuration: CaptureConfiguration) -> IntakeMoveBatchResult {
+        calls += 1
+        submittedItems = items
+        return result
+    }
+}
+
+private final class StubPreparedEnumerator: PreparedItemsEnumerating {
+    private var results: [PreparedItemsEnumerationResult]
+    private(set) var calls = 0
+
+    init(results: [PreparedItemsEnumerationResult]) { self.results = results }
+
+    func enumerate(configuration: CaptureConfiguration, fileSystem: any CaptureFileSystem) throws -> PreparedItemsEnumerationResult {
+        calls += 1
+        return results[min(calls - 1, results.count - 1)]
+    }
+}
+
+private final class StubPreparedMover: PreparedItemsMoving {
+    let result: PreparedItemMoveBatchResult
+    private(set) var calls = 0
+    private(set) var submittedItems: [PreparedIntakeItem] = []
+
+    init(result: PreparedItemMoveBatchResult) { self.result = result }
+
+    func move(selected items: [PreparedIntakeItem], configuration: CaptureConfiguration) -> PreparedItemMoveBatchResult {
         calls += 1
         submittedItems = items
         return result
