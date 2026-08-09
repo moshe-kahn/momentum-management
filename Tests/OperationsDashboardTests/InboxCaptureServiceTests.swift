@@ -133,6 +133,24 @@ final class InboxCaptureServiceTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: fixture.destination.appending(path: "report (2).txt")), "source")
     }
 
+    func testPreparedItemsWithTheSameNameFromBothSourcesMoveSeriallyWithoutOverwrite() throws {
+        let fixture = try PreparedMoveFixture()
+        try fixture.write("icloud", at: fixture.firstPrepared.appending(path: "same.txt"))
+        try fixture.write("kahntra", at: fixture.secondPrepared.appending(path: "same.txt"))
+        let items = try PreparedItemsEnumerator().enumerate(configuration: fixture.configuration, fileSystem: LocalCaptureFileSystem()).items
+
+        let result = fixture.service.move(selected: items, configuration: fixture.configuration)
+
+        XCTAssertEqual(result.results.map(\.outcome), [
+            .moved(destination: fixture.destination.appending(path: "same.txt")),
+            .moved(destination: fixture.destination.appending(path: "same (2).txt"))
+        ])
+        XCTAssertEqual(try String(contentsOf: fixture.destination.appending(path: "same.txt")), "icloud")
+        XCTAssertEqual(try String(contentsOf: fixture.destination.appending(path: "same (2).txt")), "kahntra")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.firstPrepared.appending(path: "same.txt").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.secondPrepared.appending(path: "same.txt").path))
+    }
+
     func testPreparedItemsRejectNestedOrMismatchedFolderItems() throws {
         let fixture = try PreparedMoveFixture()
         try FileManager.default.createDirectory(at: fixture.firstPrepared.appending(path: "Folder"), withIntermediateDirectories: false)

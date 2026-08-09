@@ -215,7 +215,7 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(preparedMover.calls, 1)
         XCTAssertEqual(preparedMover.submittedItems, [prepared])
         XCTAssertEqual(model.preparedItems, [])
-        XCTAssertEqual(model.sessionResults.first?.title, "Moved ready.txt")
+        XCTAssertEqual(model.sessionResults.first?.title, "Moved ready.txt from iCloud Drive Downloads")
         XCTAssertEqual(model.sessionResults.first?.isCurrent, true)
     }
 

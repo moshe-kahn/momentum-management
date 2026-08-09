@@ -284,11 +284,11 @@ final class EnterpriseInboxCaptureViewModel: ObservableObject {
             case let .moved(destination):
                 let renamed = destination.lastPathComponent != result.item.displayName
                 let title = renamed
-                    ? "Moved \(result.item.displayName), renamed to \(destination.lastPathComponent)"
-                    : "Moved \(result.item.displayName)"
+                    ? "Moved \(result.item.displayName) from \(result.item.sourceDisplayName), renamed to \(destination.lastPathComponent)"
+                    : "Moved \(result.item.displayName) from \(result.item.sourceDisplayName)"
                 return CaptureSessionResult(title: title, succeeded: true, isCurrent: true)
             case let .failed(_, diagnostic, _):
-                return CaptureSessionResult(title: "Did not move \(result.item.displayName): \(diagnostic)", succeeded: false, isCurrent: true)
+                return CaptureSessionResult(title: "Did not move \(result.item.displayName) from \(result.item.sourceDisplayName): \(diagnostic)", succeeded: false, isCurrent: true)
             }
         })
     }
