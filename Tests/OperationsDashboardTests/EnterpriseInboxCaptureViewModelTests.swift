@@ -74,6 +74,21 @@ final class EnterpriseInboxCaptureViewModelTests: XCTestCase {
         XCTAssertEqual(model.sessionResults.first?.isCurrent, true)
     }
 
+    func testCollisionMoveResultNamesTheRenamedDestination() throws {
+        let item = item(name: "test.txt", sourceID: "kahntra-downloads")
+        let renamedDestination = URL(fileURLWithPath: "/enterprise/Dashboard/Inbox/test (2).txt")
+        let mover = StubMover(result: IntakeMoveBatchResult(results: [
+            IntakeMoveResult(item: item, outcome: .moved(destination: renamedDestination))
+        ]))
+        let model = makeModel(results: [result(items: [item]), result(items: [])], mover: mover)
+        model.toggleSelection(of: item)
+        model.requestMoveConfirmation()
+        model.confirmMove()
+
+        XCTAssertEqual(model.sessionResults.map(\.title), ["Moved test.txt, renamed to test (2).txt"])
+        XCTAssertEqual(model.sessionResults.first?.isCurrent, true)
+    }
+
     func testPartialFailureKeepsFailedVisibleItemSelected() throws {
         let moved = item(name: "moved.txt", sourceID: "icloud-downloads")
         let failed = item(name: "failed.txt", sourceID: "kahntra-downloads")
