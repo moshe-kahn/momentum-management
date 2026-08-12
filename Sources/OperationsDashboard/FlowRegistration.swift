@@ -155,6 +155,28 @@ struct FlowRegistrationService {
     /// back an incomplete transaction, because a committed identifier is retired.
     func startupRecovery() -> [FlowRegistrationJournal] { (try? journalStore.incomplete()) ?? [] }
 
+    /// The human Inbox intake path establishes custody only. Enrichment remains
+    /// possible for authorized callers through the regular metadata argument.
+    func automaticDefaults(configuration: ProductionsConfiguration, payload: FlowItem) throws -> FlowRegistrationMetadata {
+        let path = try eligiblePayload(payload, paths: Paths(configuration))
+        let url = configuration.rootURL.appending(path: path)
+        var status = stat()
+        guard lstat(url.path, &status) == 0 else { throw FlowRegistrationError.ineligible("Inbox payload no longer exists.") }
+        let type = (status.st_mode & S_IFMT) == S_IFDIR ? "Unclassified folder" : "Unclassified file"
+        return FlowRegistrationMetadata(
+            label: url.lastPathComponent,
+            type: type,
+            summary: "Unclassified Inbox payload awaiting review.",
+            nextDisposition: "Review and route to Processing or a durable destination.",
+            priority: "Unranked",
+            steward: "Office",
+            department: "Unassigned",
+            product: "Unassigned",
+            source: "Inbox filesystem intake",
+            relatedWork: "—"
+        )
+    }
+
     func preview(configuration: ProductionsConfiguration, payload: FlowItem, metadata: FlowRegistrationMetadata) throws -> FlowRegistrationPreview {
         try validate(metadata)
         let paths = Paths(configuration)

@@ -12,9 +12,11 @@ final class ProductionsDashboardViewModel: ObservableObject {
     private let reader: any ProductionsReading
     private let opener: any SourceOpening
     private let registrationService: FlowRegistrationService
+    private let automaticIntake: InboxAutomaticIntake
+    @Published private(set) var intakeResults: [InboxIntakeResult] = []
 
-    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService()) {
-        self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService
+    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil) {
+        self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService; self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
         do { if let configuration = try store.load() { rootPath = configuration.productionsRootPath; load(configuration); settingsIssues = state?.issues ?? [] } } catch { message = error.localizedDescription }
     }
     func chooseRoot() { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Use Productions Folder"; guard panel.runModal() == .OK, let url = panel.url else { return }; rootPath = url.standardizedFileURL.path; preflightSelection() }
@@ -26,6 +28,22 @@ final class ProductionsDashboardViewModel: ObservableObject {
         do { try store.save(configuration); load(configuration) } catch { message = error.localizedDescription }
     }
     func refresh() { validate() }
+    /// Host filesystem watchers call this after Inbox changes; it runs the same
+    /// quiescence-gated automatic intake pass as startup and Refresh.
+    func inboxFilesystemDidChange() { validate() }
+    func retryRegistration(payload: FlowItem) {
+        guard let configuration = state?.configuration else { return }
+        let result = automaticIntake.retry(configuration: configuration, payload: payload) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+        intakeResults = [result]
+        load(configuration)
+    }
+    func retryProblem(for payload: FlowItem) -> String? {
+        guard let result = intakeResults.first(where: { $0.payloadPath == payload.location }) else { return nil }
+        switch result.outcome {
+        case .problem, .investigationRequired, .suspended: return result.reason
+        case .deferred, .registered: return nil
+        }
+    }
     func registrationPreview(payload: FlowItem, metadata: FlowRegistrationMetadata) throws -> FlowRegistrationPreview {
         guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }
         return try registrationService.preview(configuration: configuration, payload: payload, metadata: metadata)
@@ -41,14 +59,20 @@ final class ProductionsDashboardViewModel: ObservableObject {
     var blockingSettingsIssues: [ProductionsIssue] { settingsIssues.filter { if case .missing = $0 { return true }; if case .unreadable = $0 { return true }; return false } }
     var hasBlockingSettingsIssues: Bool { !blockingSettingsIssues.isEmpty }
     func preflightSelection() { settingsIssues = ProductionsLoader(reader: reader).load(configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)).issues }
-    private func load(_ configuration: ProductionsConfiguration) { let next = ProductionsLoader(reader: reader).load(configuration: configuration); state = next; message = next.issues.isEmpty ? nil : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"; if selectedID == nil { selectedID = next.work.first?.id ?? next.processing.first?.id ?? next.inbox.first?.id } }
+    private func load(_ configuration: ProductionsConfiguration) {
+        let initial = ProductionsLoader(reader: reader).load(configuration: configuration)
+        intakeResults = automaticIntake.scan(configuration: configuration, candidates: initial.inbox) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+        let next = ProductionsLoader(reader: reader).load(configuration: configuration)
+        state = next
+        message = next.issues.isEmpty ? intakeResults.first(where: { if case .suspended = $0.outcome { return true }; return false })?.reason : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"
+        if selectedID == nil { selectedID = next.work.first?.id ?? next.processing.first?.id ?? next.inbox.first?.id }
+    }
 }
 
 struct ProductionsDashboardView: View {
     @StateObject private var model = ProductionsDashboardViewModel()
     @State private var section = "Inbox"
     @State private var isShowingSettings = false
-    @State private var registrationPayload: FlowItem?
     private let sections = ["Inbox", "Processing", "Canvas", "Work", "Threads", "Detail"]
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -72,9 +96,6 @@ struct ProductionsDashboardView: View {
         .sheet(isPresented: $isShowingSettings) {
             ProductionsSettingsView(model: model, isPresented: $isShowingSettings)
         }
-        .sheet(item: $registrationPayload) { payload in
-            FlowRegistrationSheet(model: model, payload: payload) { registrationPayload = nil }
-        }
     }
     private var setup: some View { VStack(alignment: .leading, spacing: 10) { Text("Configure Productions root").font(.headline); Text("Version 2 reads the shared Productions system. Existing version 1 configuration remains untouched for recovery.").foregroundStyle(.secondary); Text(model.rootPath.isEmpty ? "No root selected" : model.rootPath).font(.caption).textSelection(.enabled); HStack { Button("Choose Productions Folder") { model.chooseRoot() }; Button("Save and Load") { model.saveAndLoad() }.disabled(model.rootPath.isEmpty) }; if let message = model.message { Text(message).foregroundStyle(.orange) } } }
     @ViewBuilder private var content: some View {
@@ -85,7 +106,7 @@ struct ProductionsDashboardView: View {
             case "Canvas": CanvasList(state: state, select: { model.selectedID = $0 })
             case "Work": WorkList(items: state.work, canvas: state.canvasCurrentIDs, select: { model.selectedID = $0 })
             case "Threads": ThreadsList(crumbs: state.crumbs, mementos: state.mementos, select: { model.selectedID = $0 })
-            default: DetailView(state: state, selectedID: model.selectedID, open: model.open, register: { payload in registrationPayload = payload })
+            default: DetailView(state: state, selectedID: model.selectedID, open: model.open, retry: model.retryRegistration, problem: model.retryProblem)
             }
         }
     }
@@ -174,7 +195,8 @@ private struct DetailView: View {
     let state: ProductionsState
     let selectedID: String?
     let open: (String, Bool) -> Void
-    let register: (FlowItem) -> Void
+    let retry: (FlowItem) -> Void
+    let problem: (FlowItem) -> String?
 
     var body: some View {
         ScrollView {
@@ -191,7 +213,10 @@ private struct DetailView: View {
                     HStack {
                         Button("Open") { open(flow.location, flow.stage == "Processing") }
                         Button("Open Containing Folder") { open(flow.stage == "Inbox" ? "Office/Inbox" : "Office/Processing", true) }
-                        if flow.isUnregistered { Button("Register in Flow…") { register(flow) } }
+                        if flow.isUnregistered, let reason = problem(flow) {
+                            Text(reason).font(.caption).foregroundStyle(.orange)
+                            Button("Retry registration") { retry(flow) }
+                        }
                     }
                 } else { ContentUnavailableView("Select an item", systemImage: "doc.text") }
                 if !state.issues.isEmpty {

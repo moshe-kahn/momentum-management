@@ -5,6 +5,145 @@ import XCTest
 final class FlowRegistrationTests: XCTestCase {
     private let date = ISO8601DateFormatter().date(from: "2026-08-11T18:00:00Z")!
 
+    func testAutomaticStartupDiscoveryDefersThenRefreshRegistersFileDefaults() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("file", at: "Office/Inbox/Automatic.txt")
+        let clock = TestClock(date)
+        let journal = MemoryJournal()
+        let intake = InboxAutomaticIntake(registration: service(journal: journal, clock: clock), quiescenceInterval: 2, now: { clock.value })
+        let initial = fixture.load()
+        let first = intake.scan(configuration: config(fixture), candidates: initial.inbox, reload: { _ in fixture.load() })
+        XCTAssertEqual(first.first?.outcome, .deferred)
+        XCTAssertFalse(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("Automatic.txt"))
+        clock.advance(2)
+        let second = intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        XCTAssertEqual(second.first?.outcome, .registered("FLOW-000002"))
+        let row = try XCTUnwrap(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).split(separator: "\n").last.map(String.init))
+        let cells = MarkdownTable.cells(row)
+        XCTAssertEqual(Array(cells[1...12]), ["Automatic.txt", "Unclassified file", "Inbox", "Unranked", "Office", "Unassigned", "Unassigned", "Inbox filesystem intake", "—", "`Office/Inbox/Automatic.txt`", "Unclassified Inbox payload awaiting review.", "Review and route to Processing or a durable destination."])
+    }
+
+    func testAutomaticFolderDefaultsAndPayloadImmutability() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("child", at: "Office/Inbox/Automatic Folder/child.txt")
+        let before = try fixture.snapshot(); let clock = TestClock(date)
+        let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 1, now: { clock.value })
+        _ = intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        clock.advance(1)
+        _ = intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        XCTAssertEqual(try fixture.data(at: "Office/Inbox/Automatic Folder/child.txt"), before["Office/Inbox/Automatic Folder/child.txt"])
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("| Automatic Folder | Unclassified folder | Inbox |"))
+    }
+
+    func testQuiescenceDefersChangingPayloadUntilStable() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("one", at: "Office/Inbox/copying.txt")
+        let clock = TestClock(date); let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 2, now: { clock.value })
+        _ = intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        clock.advance(2); try fixture.add("one plus more", at: "Office/Inbox/copying.txt")
+        XCTAssertEqual(intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() }).first?.outcome, .deferred)
+        clock.advance(2)
+        XCTAssertEqual(intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() }).first?.outcome, .registered("FLOW-000002"))
+    }
+
+    func testAutomaticIntakeIsDeterministicAndSerial() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("b", at: "Office/Inbox/b.txt"); try fixture.add("a", at: "Office/Inbox/a.txt")
+        let clock = TestClock(date); let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 1, now: { clock.value })
+        _ = intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        clock.advance(1)
+        let results = intake.scan(configuration: config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        XCTAssertEqual(results.map(\.payloadPath), ["Office/Inbox/a.txt", "Office/Inbox/b.txt"])
+        XCTAssertEqual(results.map(\.outcome), [.registered("FLOW-000002"), .registered("FLOW-000003")])
+    }
+
+    func testUnsupportedAndDuplicatePayloadsDoNotIssueIDs() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let fifo = fixture.root.appending(path: "Office/Inbox/unsupported")
+        XCTAssertEqual(mkfifo(fifo.path, 0o600), 0)
+        let unsupported = FlowItem(viewIdentity: "unsupported", flowID: nil, label: "unsupported", type: "Unregistered", stage: "Inbox", priority: "", location: "Office/Inbox/unsupported", summary: "", bundleContent: nil)
+        let beforeLedger = try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md")
+        let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal()), quiescenceInterval: 0)
+        XCTAssertEqual(intake.scan(configuration: config(fixture), candidates: [unsupported], reload: { _ in fixture.load() }).first?.outcome, .problem)
+        XCTAssertEqual(try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md"), beforeLedger)
+        let duplicate = try payload(fixture, "Inbox item")
+        XCTAssertTrue(intake.scan(configuration: config(fixture), candidates: [duplicate], reload: { _ in fixture.load() }).isEmpty)
+    }
+
+    func testConcurrentWriterAndContractConflictSuspendPassWithoutLaterWrites() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("a", at: "Office/Inbox/a.txt"); try fixture.add("b", at: "Office/Inbox/b.txt")
+        let clock = TestClock(date); let cfg = config(fixture)
+        let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 0, now: { clock.value })
+        _ = intake.scan(configuration: cfg, candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        let held = LocalFlowRegistrationLocking().acquire(ledgerURL: cfg.url("Warehouse/Reference/Identifier Ledger.md"))
+        let locked = intake.scan(configuration: cfg, candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        XCTAssertEqual(locked.first?.outcome, .suspended); XCTAssertEqual(locked.count, 1)
+        withExtendedLifetime(held) {}
+        fixture.replaceFlow("| Entry ID | Label | Type | Stage | Priority | Steward | Department | Product | Source | Related work | Location | Summary | Next disposition | Created |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        let conflicted = intake.scan(configuration: cfg, candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        XCTAssertEqual(conflicted.first?.outcome, .suspended); XCTAssertEqual(conflicted.count, 1)
+        XCTAssertFalse(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("a.txt"))
+    }
+
+    func testRetiredIDFailureDoesNotLoopAutomaticallyAndManualRetryUsesNewID() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("one", at: "Office/Inbox/retired.txt")
+        let clock = TestClock(date); let journal = MemoryJournal(); let failing = ControlledReplacer(failOn: 2)
+        let intake = InboxAutomaticIntake(registration: service(journal: journal, replacer: failing, clock: clock), quiescenceInterval: 0, now: { clock.value })
+        let item = try payload(fixture, "retired.txt")
+        _ = intake.scan(configuration: config(fixture), candidates: [item], reload: { _ in fixture.load() })
+        XCTAssertEqual(intake.scan(configuration: config(fixture), candidates: [item], reload: { _ in fixture.load() }).first?.outcome, .investigationRequired)
+        let ledgerAfterFailure = try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md")
+        XCTAssertTrue(String(decoding: ledgerAfterFailure, as: UTF8.self).contains("| FLOW | 6 | 2 |"))
+        XCTAssertEqual(intake.scan(configuration: config(fixture), candidates: [item], reload: { _ in fixture.load() }).first?.outcome, .investigationRequired)
+        XCTAssertEqual(try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md"), ledgerAfterFailure)
+        let recovered = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 0, now: { clock.value })
+        XCTAssertEqual(recovered.retry(configuration: config(fixture), payload: item, reload: { _ in fixture.load() }).outcome, .registered("FLOW-000003"))
+    }
+
+    func testAutomaticDefaultsRegisterAFileWithExactBasename() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("file", at: "Office/Inbox/Exact Name.txt")
+        let svc = service(journal: MemoryJournal()); let item = try payload(fixture, "Exact Name.txt")
+        let defaults = try svc.automaticDefaults(configuration: config(fixture), payload: item)
+        XCTAssertEqual(defaults.label, "Exact Name.txt")
+        XCTAssertEqual(defaults.type, "Unclassified file")
+        XCTAssertEqual(defaults.priority, "Unranked")
+        XCTAssertEqual(defaults.steward, "Office")
+        XCTAssertEqual(defaults.department, "Unassigned")
+        XCTAssertEqual(defaults.product, "Unassigned")
+        XCTAssertEqual(defaults.source, "Inbox filesystem intake")
+        XCTAssertEqual(defaults.relatedWork, "—")
+        XCTAssertEqual(defaults.summary, "Unclassified Inbox payload awaiting review.")
+        XCTAssertEqual(defaults.nextDisposition, "Review and route to Processing or a durable destination.")
+        let preview = try svc.preview(configuration: config(fixture), payload: item, metadata: defaults)
+        XCTAssertTrue(preview.row.contains("| Exact Name.txt | Unclassified file | Inbox |"))
+    }
+
+    func testAutomaticDefaultsRegisterAFolderWithExactBasename() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("child", at: "Office/Inbox/Research Folder/child.md")
+        let svc = service(journal: MemoryJournal()); let item = try payload(fixture, "Research Folder")
+        let defaults = try svc.automaticDefaults(configuration: config(fixture), payload: item)
+        XCTAssertEqual(defaults.label, "Research Folder")
+        XCTAssertEqual(defaults.type, "Unclassified folder")
+        let before = try fixture.snapshot()
+        let preview = try svc.preview(configuration: config(fixture), payload: item, metadata: defaults)
+        XCTAssertEqual(try fixture.snapshot(), before, "Preview/cancellation must not mutate the folder or descendants.")
+        XCTAssertEqual(MarkdownTable.cells(preview.row).count, 15)
+    }
+
+    func testAuthorizedMetadataOverrideRemainsSupported() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("file", at: "Office/Inbox/override.txt")
+        let svc = service(journal: MemoryJournal()); let item = try payload(fixture, "override.txt")
+        var metadata = try svc.automaticDefaults(configuration: config(fixture), payload: item)
+        metadata.label = "Codex-enriched intake"; metadata.type = "Research note"; metadata.priority = "High"
+        let preview = try svc.preview(configuration: config(fixture), payload: item, metadata: metadata)
+        XCTAssertTrue(preview.row.contains("| Codex-enriched intake | Research note | Inbox | High |"))
+    }
+
     func testPreviewAndCancellationBoundariesDoNotWrite() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         try fixture.add("new", at: "Office/Inbox/new.txt")
@@ -164,7 +303,7 @@ final class FlowRegistrationTests: XCTestCase {
     private func config(_ fixture: SyntheticProductionsFixture) -> ProductionsConfiguration { ProductionsConfiguration(schemaVersion: 2, productionsRootPath: fixture.root.path) }
     private func metadata() -> FlowRegistrationMetadata { FlowRegistrationMetadata(label: "New Inbox Item", type: "Note", summary: "Synthetic summary", nextDisposition: "Review") }
     private func payload(_ fixture: SyntheticProductionsFixture, _ name: String) throws -> FlowItem { try XCTUnwrap(fixture.load().inbox.first { $0.label == name }) }
-    private func service(journal: MemoryJournal, replacer: (any AtomicFileReplacing)? = nil) -> FlowRegistrationService { FlowRegistrationService(journalStore: journal, replacer: replacer, now: { self.date }) }
+    private func service(journal: MemoryJournal, replacer: (any AtomicFileReplacing)? = nil, clock: TestClock? = nil) -> FlowRegistrationService { FlowRegistrationService(journalStore: journal, replacer: replacer, now: { clock?.value ?? self.date }) }
 }
 
 private final class MemoryJournal: FlowRegistrationJournalStore {
@@ -185,3 +324,5 @@ private final class ControlledReplacer: AtomicFileReplacing {
         try DurableReplacement().replace(data: data, at: target)
     }
 }
+
+private final class TestClock { var value: Date; init(_ value: Date) { self.value = value }; func advance(_ seconds: TimeInterval) { value = value.addingTimeInterval(seconds) } }
