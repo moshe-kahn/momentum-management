@@ -12,7 +12,7 @@ struct OperationsDashboardApp: App {
 
     var body: some Scene {
         WindowGroup("Operations Dashboard") {
-            DashboardView(viewModel: DashboardViewModel.live())
+            ProductionsDashboardView()
         }
         .windowResizability(.contentMinSize)
     }
