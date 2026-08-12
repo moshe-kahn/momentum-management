@@ -85,12 +85,57 @@ struct ProductionsInboxCaptureService {
 }
 
 
+/// App/ViewModel-owned lifecycle for the configured automatic source. It
+/// continues after the capture sheet closes and owns exactly one polling task.
+@MainActor
+final class ProductionsAutomaticCaptureMonitor: ObservableObject {
+    @Published private(set) var sourcePath: String
+    @Published private(set) var latestOutcome: ProductionsInboxCaptureOutcome?
+    private var service: ProductionsInboxCaptureService
+    private var pollingTask: Task<Void, Never>?
+    private var rootPath = ""
+    private let storage: UserDefaults
+    private let pollInterval: Duration
+    static let sourceKey = "operations-dashboard.capture.automatic-source"
+
+    init(storage: UserDefaults = .standard, pollInterval: Duration = .seconds(2), service: ProductionsInboxCaptureService = ProductionsInboxCaptureService()) {
+        self.storage = storage; self.pollInterval = pollInterval; self.service = service
+        sourcePath = storage.string(forKey: Self.sourceKey) ?? ""
+    }
+    var isMonitoring: Bool { pollingTask != nil }
+    func start(productionsRootPath: String) {
+        rootPath = productionsRootPath
+        guard !sourcePath.isEmpty, !rootPath.isEmpty, pollingTask == nil else { return }
+        let interval = pollInterval
+        pollingTask = Task { [weak self, interval] in
+            while !Task.isCancelled {
+                guard self != nil else { return }
+                self?.observeNow()
+                try? await Task.sleep(for: interval)
+            }
+        }
+    }
+    func configure(source: URL, productionsRootPath: String) {
+        stop(); rootPath = productionsRootPath; sourcePath = source.standardizedFileURL.path
+        storage.set(sourcePath, forKey: Self.sourceKey)
+        latestOutcome = nil
+        start(productionsRootPath: productionsRootPath)
+    }
+    func observeNow() {
+        guard !sourcePath.isEmpty, !rootPath.isEmpty else { return }
+        let outcomes = service.observeAutomatic(sourceFolder: URL(fileURLWithPath: sourcePath, isDirectory: true), productionsRoot: URL(fileURLWithPath: rootPath, isDirectory: true))
+        latestOutcome = outcomes.last
+    }
+    func stop() { pollingTask?.cancel(); pollingTask = nil }
+    deinit { pollingTask?.cancel() }
+}
+
 /// Thin TASK-0043 UI: all copying, typed-note creation, and stability checks
 /// live in ProductionsInboxCaptureService and never call Flow registration.
 struct ProductionsInboxCaptureSheet: View {
     let rootPath: String
+    @ObservedObject var monitor: ProductionsAutomaticCaptureMonitor
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("operations-dashboard.capture.automatic-source") private var automaticSourcePath = ""
     @State private var service = ProductionsInboxCaptureService()
     @State private var note = ""
     @State private var message = ""
@@ -108,26 +153,22 @@ struct ProductionsInboxCaptureSheet: View {
                 HStack { Spacer(); Button("Save Note") { report(service.createTypedNote(text: note, productionsRoot: root)) }.disabled(note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
             }
             GroupBox("Automatic capture folder") {
-                Text(automaticSourcePath.isEmpty ? "No folder configured." : automaticSourcePath).font(.caption).textSelection(.enabled)
+                Text(monitor.sourcePath.isEmpty ? "No folder configured." : monitor.sourcePath).font(.caption).textSelection(.enabled)
                 HStack {
                     Button("Choose Folder…", action: chooseAutomaticFolder)
-                    Button("Check Now", action: observeAutomatic).disabled(automaticSourcePath.isEmpty)
+                    Button("Check Now", action: monitor.observeNow).disabled(monitor.sourcePath.isEmpty)
                 }
+                Text(monitor.isMonitoring ? "Monitoring continues while the dashboard is open." : "Monitoring starts when a folder is configured and the dashboard is open.").font(.caption).foregroundStyle(.secondary)
                 Text("Eligible immediate items are moved only after two unchanged observations. Conflicts remain in the source folder.").font(.caption).foregroundStyle(.secondary)
             }
+            if let outcome = monitor.latestOutcome { outcomeText(outcome) }
             if !message.isEmpty { Text(message).foregroundStyle(message.hasPrefix("Captured") ? .green : .orange).textSelection(.enabled) }
             HStack { Spacer(); Button("Done") { dismiss() } }
         }
         .padding().frame(minWidth: 620, minHeight: 460)
-        .task(id: automaticSourcePath) {
-            while !Task.isCancelled && !automaticSourcePath.isEmpty {
-                observeAutomatic()
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
     }
     private func copyManual() { let panel = NSOpenPanel(); panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Copy to Inbox"; guard panel.runModal() == .OK, let source = panel.url else { return }; report(service.copyManual(source: source, productionsRoot: root)) }
-    private func chooseAutomaticFolder() { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Use Capture Folder"; guard panel.runModal() == .OK, let source = panel.url else { return }; automaticSourcePath = source.standardizedFileURL.path; message = "Automatic capture folder configured." }
-    private func observeAutomatic() { guard !automaticSourcePath.isEmpty else { return }; let results = service.observeAutomatic(sourceFolder: URL(fileURLWithPath: automaticSourcePath, isDirectory: true), productionsRoot: root); if let last = results.last { report(last) } }
+    private func chooseAutomaticFolder() { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Use Capture Folder"; guard panel.runModal() == .OK, let source = panel.url else { return }; monitor.configure(source: source, productionsRootPath: rootPath) }
+    @ViewBuilder private func outcomeText(_ outcome: ProductionsInboxCaptureOutcome) -> some View { switch outcome { case let .captured(url): Text("Captured \(url.lastPathComponent). ").foregroundStyle(.green); case let .deferred(reason), let .rejected(reason): Text(reason).foregroundStyle(.orange) } }
     private func report(_ outcome: ProductionsInboxCaptureOutcome) { switch outcome { case let .captured(url): message = "Captured \(url.lastPathComponent)."; note = ""; case let .deferred(reason), let .rejected(reason): message = reason } }
 }

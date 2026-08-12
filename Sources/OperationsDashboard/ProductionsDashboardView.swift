@@ -18,6 +18,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
     @Published var selectedID: String?
     @Published private(set) var intakeResults: [InboxIntakeResult] = []
     @Published private(set) var intakeDiagnostics = IntakeDiagnostics()
+    let captureMonitor: ProductionsAutomaticCaptureMonitor
     private let store: ProductionsConfigurationStore
     private let reader: any ProductionsReading
     private let opener: any SourceOpening
@@ -33,7 +34,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
     init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
         self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService
         self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
-        self.scheduler = intakeScheduler; self.now = now
+        self.scheduler = intakeScheduler; self.now = now; self.captureMonitor = ProductionsAutomaticCaptureMonitor()
         IntakeLifecycleLog.event(instanceID, "ViewModel created")
         do {
             let configuration = try initialConfiguration.map { $0 } ?? store.load()
@@ -47,6 +48,8 @@ final class ProductionsDashboardViewModel: ObservableObject {
 
     /// Called by the installed SwiftUI lifecycle, never from init. It is
     /// idempotent across repeated appearances and owns the only recheck timer.
+    func startAutomaticCaptureMonitoring() { captureMonitor.start(productionsRootPath: rootPath) }
+
     func startAutomaticIntake() {
         IntakeLifecycleLog.event(instanceID, "startAutomaticIntake entry")
         guard !installedIntakeStarted, state?.issues.isEmpty == true else { IntakeLifecycleLog.event(instanceID, "startAutomaticIntake idempotence/config rejection"); return }
@@ -67,7 +70,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
 
     func chooseRoot() { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Use Productions Folder"; guard panel.runModal() == .OK, let url = panel.url else { return }; rootPath = url.standardizedFileURL.path; preflightSelection() }
     func validate() { readOnlyLoad(ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)); observeIntakeIfInstalled() }
-    func saveAndLoad() { preflightSelection(); guard !hasBlockingSettingsIssues else { return }; let configuration = ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath); do { try store.save(configuration); readOnlyLoad(configuration); observeIntakeIfInstalled() } catch { message = error.localizedDescription } }
+    func saveAndLoad() { preflightSelection(); guard !hasBlockingSettingsIssues else { return }; let configuration = ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath); do { try store.save(configuration); readOnlyLoad(configuration); observeIntakeIfInstalled(); startAutomaticCaptureMonitoring() } catch { message = error.localizedDescription } }
     func refresh() { validate() }
     func inboxFilesystemDidChange() { validate() }
     func retryRegistration(payload: FlowItem) { guard let configuration = state?.configuration else { return }; let result = automaticIntake.retry(configuration: configuration, payload: payload) { ProductionsLoader(reader: self.reader).load(configuration: $0) }; intakeResults = [result]; readOnlyLoad(configuration) }
@@ -131,9 +134,9 @@ struct ProductionsDashboardView: View {
             ProductionsSettingsView(model: model, isPresented: $isShowingSettings)
         }
         .sheet(isPresented: $isShowingCapture) {
-            ProductionsInboxCaptureSheet(rootPath: model.rootPath)
+            ProductionsInboxCaptureSheet(rootPath: model.rootPath, monitor: model.captureMonitor)
         }
-        .task { model.startAutomaticIntake() }
+        .task { model.startAutomaticIntake(); model.startAutomaticCaptureMonitoring() }
     }
     private var setup: some View { VStack(alignment: .leading, spacing: 10) { Text("Configure Productions root").font(.headline); Text("Version 2 reads the shared Productions system. Existing version 1 configuration remains untouched for recovery.").foregroundStyle(.secondary); Text(model.rootPath.isEmpty ? "No root selected" : model.rootPath).font(.caption).textSelection(.enabled); HStack { Button("Choose Productions Folder") { model.chooseRoot() }; Button("Save and Load") { model.saveAndLoad() }.disabled(model.rootPath.isEmpty) }; if let message = model.message { Text(message).foregroundStyle(.orange) } } }
     @ViewBuilder private var content: some View {

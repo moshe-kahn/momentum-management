@@ -47,6 +47,32 @@ final class ProductionsInboxCaptureTests: XCTestCase {
         XCTAssertFalse(fixture.manager.fileExists(atPath: fixture.source.appending(path: "a.txt").path))
         XCTAssertEqual(try fixture.contractSnapshot(), before)
     }
+    @MainActor
+    func testMonitorIsIdempotentPersistsItsOneConfiguredSourceAndStopsSafely() throws {
+        let fixture = try CaptureFixture(); defer { fixture.remove() }
+        let suite = "TASK0043-\(UUID().uuidString)"; let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
+        let monitor = ProductionsAutomaticCaptureMonitor(storage: defaults, pollInterval: .seconds(60))
+        monitor.configure(source: fixture.source, productionsRootPath: fixture.root.path)
+        XCTAssertEqual(monitor.sourcePath, fixture.source.path)
+        XCTAssertTrue(monitor.isMonitoring)
+        monitor.start(productionsRootPath: fixture.root.path)
+        XCTAssertTrue(monitor.isMonitoring)
+        monitor.stop()
+        XCTAssertFalse(monitor.isMonitoring)
+    }
+    @MainActor
+    func testMonitorDoesNotOutliveItsOwnerWhenStopped() throws {
+        let fixture = try CaptureFixture(); defer { fixture.remove() }
+        let suite = "TASK0043-release-\(UUID().uuidString)"; let defaults = UserDefaults(suiteName: suite)!; defer { defaults.removePersistentDomain(forName: suite) }
+        weak var released: ProductionsAutomaticCaptureMonitor?
+        do {
+            var monitor: ProductionsAutomaticCaptureMonitor? = ProductionsAutomaticCaptureMonitor(storage: defaults, pollInterval: .seconds(60))
+            monitor?.configure(source: fixture.source, productionsRootPath: fixture.root.path)
+            released = monitor
+            monitor = nil
+        }
+        XCTAssertNil(released)
+    }
     func testAutomaticConflictAndSymlinkLeaveSourcesUntouched() throws {
         let fixture = try CaptureFixture(); defer { fixture.remove() }
         let source = fixture.source.appending(path: "conflict.txt"); try Data("source".utf8).write(to: source); try Data("dest".utf8).write(to: fixture.inbox.appending(path: "conflict.txt"))
