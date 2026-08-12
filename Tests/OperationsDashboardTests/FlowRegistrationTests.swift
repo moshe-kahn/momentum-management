@@ -5,6 +5,74 @@ import XCTest
 final class FlowRegistrationTests: XCTestCase {
     private let date = ISO8601DateFormatter().date(from: "2026-08-11T18:00:00Z")!
 
+    func testStartupLifecycleSchedulesSecondObservationAndRegistersWithoutRefresh() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("file", at: "Office/Inbox/startup.txt")
+        let clock = TestClock(date); let scheduler = ManualIntakeScheduler()
+        let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 2, now: { clock.value })
+        let lifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: 2) {
+            intake.scan(configuration: self.config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() })
+        }
+        XCTAssertEqual(lifecycle.observe().first?.outcome, .deferred)
+        XCTAssertEqual(scheduler.pendingCount, 1)
+        XCTAssertFalse(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("startup.txt"))
+        clock.advance(1)
+        XCTAssertFalse(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("startup.txt"), "Registration cannot occur before the two-second scheduled observation.")
+        XCTAssertEqual(scheduler.pendingCount, 1)
+        clock.advance(1); scheduler.runNext()
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("startup.txt"))
+        XCTAssertEqual(scheduler.pendingCount, 0)
+    }
+
+    func testScheduledObservationAfterChangeRestartsFullInterval() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("one", at: "Office/Inbox/change.txt")
+        let clock = TestClock(date); let scheduler = ManualIntakeScheduler()
+        let intake = InboxAutomaticIntake(registration: service(journal: MemoryJournal(), clock: clock), quiescenceInterval: 2, now: { clock.value })
+        let lifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: 2) { intake.scan(configuration: self.config(fixture), candidates: fixture.load().inbox, reload: { _ in fixture.load() }) }
+        _ = lifecycle.observe()
+        try fixture.add("changed", at: "Office/Inbox/change.txt")
+        clock.advance(2); scheduler.runNext()
+        XCTAssertEqual(scheduler.pendingCount, 1)
+        XCTAssertFalse(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("change.txt"))
+        clock.advance(2); scheduler.runNext()
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("change.txt"))
+    }
+
+    func testRepeatedStartupRefreshAndNotificationsCoalesceOneTimer() {
+        let scheduler = ManualIntakeScheduler()
+        var calls = 0
+        let lifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: 2) {
+            calls += 1
+            return [InboxIntakeResult(payloadPath: "Office/Inbox/item", outcome: calls < 4 ? .deferred : .registered("FLOW-000002"), reason: "test")]
+        }
+        _ = lifecycle.observe(); _ = lifecycle.observe(); _ = lifecycle.observe()
+        XCTAssertEqual(scheduler.pendingCount, 1)
+        scheduler.runNext()
+        XCTAssertEqual(calls, 4)
+        XCTAssertEqual(scheduler.pendingCount, 0)
+    }
+
+    func testBlockedAndRetiredStatesStopLifecycleScheduling() {
+        let scheduler = ManualIntakeScheduler()
+        var state: InboxIntakeResult.Outcome = .deferred
+        let lifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: 2) {
+            [InboxIntakeResult(payloadPath: "Office/Inbox/item", outcome: state, reason: "test")]
+        }
+        _ = lifecycle.observe(); XCTAssertEqual(scheduler.pendingCount, 1)
+        state = .investigationRequired; scheduler.runNext(); XCTAssertEqual(scheduler.pendingCount, 0)
+        state = .suspended; _ = lifecycle.observe(); XCTAssertEqual(scheduler.pendingCount, 0)
+    }
+
+    func testNoCandidatesDoesNotScheduleRecheckAndDeinitCancelsWork() {
+        let scheduler = ManualIntakeScheduler()
+        var lifecycle: InboxAutomaticIntakeLifecycle? = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: 2) { [] }
+        _ = lifecycle?.observe(); XCTAssertEqual(scheduler.pendingCount, 0)
+        lifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: 2) { [InboxIntakeResult(payloadPath: "Office/Inbox/item", outcome: .deferred, reason: "test")] }
+        _ = lifecycle?.observe(); XCTAssertEqual(scheduler.pendingCount, 1)
+        lifecycle = nil; XCTAssertEqual(scheduler.pendingCount, 0)
+    }
+
     func testAutomaticStartupDiscoveryDefersThenRefreshRegistersFileDefaults() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         try fixture.add("file", at: "Office/Inbox/Automatic.txt")
@@ -326,3 +394,23 @@ private final class ControlledReplacer: AtomicFileReplacing {
 }
 
 private final class TestClock { var value: Date; init(_ value: Date) { self.value = value }; func advance(_ seconds: TimeInterval) { value = value.addingTimeInterval(seconds) } }
+
+
+private final class ManualIntakeScheduler: InboxIntakeScheduling {
+    private final class Work: InboxIntakeScheduledWork {
+        var cancelled = false
+        let action: () -> Void
+        init(_ action: @escaping () -> Void) { self.action = action }
+        func cancel() { cancelled = true }
+    }
+    private var work: [Work] = []
+    var pendingCount: Int { work.filter { !$0.cancelled }.count }
+    func schedule(after delay: TimeInterval, action: @escaping () -> Void) -> any InboxIntakeScheduledWork {
+        let next = Work(action); work.append(next); return next
+    }
+    func runNext() {
+        guard let index = work.firstIndex(where: { !$0.cancelled }) else { return }
+        let next = work.remove(at: index)
+        if !next.cancelled { next.action() }
+    }
+}

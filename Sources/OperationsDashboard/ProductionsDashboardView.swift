@@ -13,6 +13,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
     private let opener: any SourceOpening
     private let registrationService: FlowRegistrationService
     private let automaticIntake: InboxAutomaticIntake
+    private lazy var intakeLifecycle = InboxAutomaticIntakeLifecycle { [weak self] in self?.performAutomaticIntake() ?? [] }
     @Published private(set) var intakeResults: [InboxIntakeResult] = []
 
     init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil) {
@@ -60,8 +61,18 @@ final class ProductionsDashboardViewModel: ObservableObject {
     var hasBlockingSettingsIssues: Bool { !blockingSettingsIssues.isEmpty }
     func preflightSelection() { settingsIssues = ProductionsLoader(reader: reader).load(configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)).issues }
     private func load(_ configuration: ProductionsConfiguration) {
-        let initial = ProductionsLoader(reader: reader).load(configuration: configuration)
-        intakeResults = automaticIntake.scan(configuration: configuration, candidates: initial.inbox) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+        state = ProductionsLoader(reader: reader).load(configuration: configuration)
+        intakeResults = intakeLifecycle.observe()
+        applyLoadedState(configuration)
+    }
+    private func performAutomaticIntake() -> [InboxIntakeResult] {
+        guard let configuration = state?.configuration else { return [] }
+        let results = automaticIntake.scan(configuration: configuration, candidates: state?.inbox ?? []) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+        intakeResults = results
+        applyLoadedState(configuration)
+        return results
+    }
+    private func applyLoadedState(_ configuration: ProductionsConfiguration) {
         let next = ProductionsLoader(reader: reader).load(configuration: configuration)
         state = next
         message = next.issues.isEmpty ? intakeResults.first(where: { if case .suspended = $0.outcome { return true }; return false })?.reason : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"

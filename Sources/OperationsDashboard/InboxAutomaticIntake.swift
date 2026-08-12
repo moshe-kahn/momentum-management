@@ -99,3 +99,61 @@ final class InboxAutomaticIntake {
         return Fingerprint(kind: Int64(kind), inode: Int64(info.st_ino), size: Int64(info.st_size), modifiedSeconds: Int64(info.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec))
     }
 }
+
+
+protocol InboxIntakeScheduledWork: AnyObject { func cancel() }
+protocol InboxIntakeScheduling {
+    func schedule(after delay: TimeInterval, action: @escaping () -> Void) -> any InboxIntakeScheduledWork
+}
+
+private final class DispatchScheduledWork: InboxIntakeScheduledWork {
+    let item: DispatchWorkItem
+    init(_ item: DispatchWorkItem) { self.item = item }
+    func cancel() { item.cancel() }
+}
+
+struct DispatchInboxIntakeScheduler: InboxIntakeScheduling {
+    func schedule(after delay: TimeInterval, action: @escaping () -> Void) -> any InboxIntakeScheduledWork {
+        let item = DispatchWorkItem(block: action)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        return DispatchScheduledWork(item)
+    }
+}
+
+/// Owns the automatic recheck lifecycle. It deliberately permits only one
+/// pending timer, and drops it before calling the scan so a rescan can safely
+/// schedule the next full quiescence interval after a payload changes.
+final class InboxAutomaticIntakeLifecycle {
+    private let scheduler: any InboxIntakeScheduling
+    private let scan: () -> [InboxIntakeResult]
+    private let delay: TimeInterval
+    private var pending: (any InboxIntakeScheduledWork)?
+
+    init(scheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), delay: TimeInterval = 2, scan: @escaping () -> [InboxIntakeResult]) {
+        self.scheduler = scheduler
+        self.delay = delay
+        self.scan = scan
+    }
+
+    @discardableResult
+    func observe() -> [InboxIntakeResult] {
+        let results = scan()
+        if results.contains(where: { $0.outcome == .deferred }) { scheduleIfNeeded() }
+        else { cancelPending() }
+        return results
+    }
+
+    var hasPendingRecheck: Bool { pending != nil }
+
+    private func scheduleIfNeeded() {
+        guard pending == nil else { return }
+        pending = scheduler.schedule(after: delay) { [weak self] in
+            guard let self else { return }
+            self.pending = nil
+            _ = self.observe()
+        }
+    }
+
+    private func cancelPending() { pending?.cancel(); pending = nil }
+    deinit { cancelPending() }
+}
