@@ -438,6 +438,20 @@ private final class ControlledReplacer: AtomicFileReplacing {
 private final class TestClock { var value: Date; init(_ value: Date) { self.value = value }; func advance(_ seconds: TimeInterval) { value = value.addingTimeInterval(seconds) } }
 
 
+final class DispatchInboxIntakeSchedulerTests: XCTestCase {
+    func testExecutesRetainedCallbackOnMainRunLoop() {
+        let fired = expectation(description: "dispatch scheduler callback")
+        let scheduler = DispatchInboxIntakeScheduler()
+        let work = scheduler.schedule(after: 0.05) {
+            XCTAssertTrue(Thread.isMainThread)
+            fired.fulfill()
+        }
+        withExtendedLifetime(work) {
+            wait(for: [fired], timeout: 1)
+        }
+    }
+}
+
 private final class ManualIntakeScheduler: InboxIntakeScheduling {
     private final class Work: InboxIntakeScheduledWork {
         var cancelled = false

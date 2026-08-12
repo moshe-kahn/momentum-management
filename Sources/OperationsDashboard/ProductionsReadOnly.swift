@@ -44,7 +44,10 @@ enum ProductionsConfigurationError: LocalizedError, Equatable {
 struct ProductionsConfigurationStore {
     let fileManager: FileManager = .default
     var configurationURL: URL {
-        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        if let override = ProcessInfo.processInfo.environment["OPERATIONS_DASHBOARD_PRODUCTIONS_CONFIG"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: false).standardizedFileURL
+        }
+        return fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appending(path: "Operations Dashboard", directoryHint: .isDirectory)
             .appending(path: "productions-config-v2.json", directoryHint: .notDirectory)
     }

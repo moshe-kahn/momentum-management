@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import OSLog
 
 /// Automatic Inbox intake observes an eligible payload twice before issuing an
 /// ID. A payload is quiescent only when its kind, inode, byte size, and mtime
@@ -106,17 +107,28 @@ protocol InboxIntakeScheduling {
     func schedule(after delay: TimeInterval, action: @escaping () -> Void) -> any InboxIntakeScheduledWork
 }
 
+enum IntakeLifecycleLog {
+    static let logger = Logger(subsystem: "com.kahntra.operations-dashboard", category: "automatic-intake")
+    static func event(_ instance: String, _ message: String) {
+        logger.notice("[\(instance, privacy: .public)] \(message, privacy: .public) main=\(Thread.isMainThread, privacy: .public)")
+    }
+}
+
 private final class DispatchScheduledWork: InboxIntakeScheduledWork {
+    let id = UUID().uuidString
     let item: DispatchWorkItem
-    init(_ item: DispatchWorkItem) { self.item = item }
-    func cancel() { item.cancel() }
+    let lifecycleID: String
+    init(lifecycleID: String, _ item: DispatchWorkItem) { self.lifecycleID = lifecycleID; self.item = item; IntakeLifecycleLog.event(lifecycleID, "scheduled work created id=\(id)") }
+    func cancel() { IntakeLifecycleLog.event(lifecycleID, "scheduled work cancel id=\(id)"); item.cancel() }
+    deinit { IntakeLifecycleLog.event(lifecycleID, "scheduled work destroyed id=\(id)") }
 }
 
 struct DispatchInboxIntakeScheduler: InboxIntakeScheduling {
     func schedule(after delay: TimeInterval, action: @escaping () -> Void) -> any InboxIntakeScheduledWork {
         let item = DispatchWorkItem(block: action)
+        // Scheduler has no owner identity; lifecycle wraps the request log.
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
-        return DispatchScheduledWork(item)
+        return DispatchScheduledWork(lifecycleID: "dispatch", item)
     }
 }
 
@@ -124,6 +136,7 @@ struct DispatchInboxIntakeScheduler: InboxIntakeScheduling {
 /// pending timer, and drops it before calling the scan so a rescan can safely
 /// schedule the next full quiescence interval after a payload changes.
 final class InboxAutomaticIntakeLifecycle {
+    let instanceID = UUID().uuidString
     private let scheduler: any InboxIntakeScheduling
     private let scan: () -> [InboxIntakeResult]
     private let delay: TimeInterval
@@ -131,32 +144,36 @@ final class InboxAutomaticIntakeLifecycle {
     private var pending: (any InboxIntakeScheduledWork)?
 
     init(scheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), delay: TimeInterval = 2, didFire: @escaping () -> Void = {}, scan: @escaping () -> [InboxIntakeResult]) {
-        self.scheduler = scheduler
-        self.delay = delay
-        self.didFire = didFire
-        self.scan = scan
+        self.scheduler = scheduler; self.delay = delay; self.didFire = didFire; self.scan = scan
+        IntakeLifecycleLog.event(instanceID, "lifecycle created")
     }
 
     @discardableResult
     func observe() -> [InboxIntakeResult] {
+        IntakeLifecycleLog.event(instanceID, "observe entry")
         let results = scan()
         if results.contains(where: { $0.outcome == .deferred }) { scheduleIfNeeded() }
-        else { cancelPending() }
+        else { cancelPending(reason: "no deferred results") }
         return results
     }
 
     var hasPendingRecheck: Bool { pending != nil }
-
     private func scheduleIfNeeded() {
-        guard pending == nil else { return }
+        guard pending == nil else { IntakeLifecycleLog.event(instanceID, "schedule coalesced pending already exists"); return }
+        IntakeLifecycleLog.event(instanceID, "scheduler request delay=\(delay) deadline=\(Date().addingTimeInterval(delay).timeIntervalSince1970)")
         pending = scheduler.schedule(after: delay) { [weak self] in
-            guard let self else { return }
+            guard let self else { IntakeLifecycleLog.event("released", "callback dropped lifecycle gone"); return }
+            IntakeLifecycleLog.event(self.instanceID, "callback entry")
+            IntakeLifecycleLog.event(self.instanceID, "pending work cleared for callback")
             self.pending = nil
             self.didFire()
             _ = self.observe()
         }
     }
-
-    private func cancelPending() { pending?.cancel(); pending = nil }
-    deinit { cancelPending() }
+    private func cancelPending(reason: String) {
+        IntakeLifecycleLog.event(instanceID, "pending cancellation requested reason=\(reason) hasPending=\(pending != nil)")
+        pending?.cancel()
+        pending = nil
+    }
+    deinit { IntakeLifecycleLog.event(instanceID, "lifecycle destruction"); cancelPending(reason: "lifecycle destruction") }
 }

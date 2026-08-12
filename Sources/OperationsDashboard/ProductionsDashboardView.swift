@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import OSLog
 
 @MainActor
 final class ProductionsDashboardViewModel: ObservableObject {
@@ -26,11 +27,14 @@ final class ProductionsDashboardViewModel: ObservableObject {
     private let now: () -> Date
     private var intakeLifecycle: InboxAutomaticIntakeLifecycle?
     private var installedIntakeStarted = false
+    private var isExecutingScheduledObservation = false
+    private let instanceID = UUID().uuidString
 
     init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
         self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService
         self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
         self.scheduler = intakeScheduler; self.now = now
+        IntakeLifecycleLog.event(instanceID, "ViewModel created")
         do {
             let configuration = try initialConfiguration.map { $0 } ?? store.load()
             if let configuration {
@@ -44,18 +48,20 @@ final class ProductionsDashboardViewModel: ObservableObject {
     /// Called by the installed SwiftUI lifecycle, never from init. It is
     /// idempotent across repeated appearances and owns the only recheck timer.
     func startAutomaticIntake() {
-        guard !installedIntakeStarted, state?.issues.isEmpty == true else { return }
+        IntakeLifecycleLog.event(instanceID, "startAutomaticIntake entry")
+        guard !installedIntakeStarted, state?.issues.isEmpty == true else { IntakeLifecycleLog.event(instanceID, "startAutomaticIntake idempotence/config rejection"); return }
         installedIntakeStarted = true
         intakeLifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: automaticIntake.quiescenceInterval, didFire: { [weak self] in
             guard let self else { return }
             self.intakeDiagnostics.callbackFired = true
-            print("Operations Dashboard intake diagnostic: scheduled callback fired")
+            self.isExecutingScheduledObservation = true
+            IntakeLifecycleLog.event(self.instanceID, "ViewModel received scheduled callback")
         }, scan: { [weak self] in self?.performAutomaticIntake() ?? [] })
         intakeResults = intakeLifecycle?.observe() ?? []
         if intakeResults.contains(where: { $0.outcome == .deferred }) {
             intakeDiagnostics.firstObservation = now()
             intakeDiagnostics.scheduledDeadline = now().addingTimeInterval(automaticIntake.quiescenceInterval)
-            print("Operations Dashboard intake diagnostic: first observation; recheck scheduled")
+            IntakeLifecycleLog.event(instanceID, "first observation; recheck scheduled")
         }
     }
 
@@ -80,12 +86,19 @@ final class ProductionsDashboardViewModel: ObservableObject {
         let results = automaticIntake.scan(configuration: configuration, candidates: before) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
         intakeResults = results
         readOnlyLoad(configuration)
-        intakeDiagnostics.secondObservationOutcome = results.map { "\($0.payloadPath): \($0.reason)" }.joined(separator: " · ")
-        intakeDiagnostics.scheduledDeadline = nil
-        print("Operations Dashboard intake diagnostic: second observation outcome: \(intakeDiagnostics.secondObservationOutcome ?? "none")")
+        if isExecutingScheduledObservation {
+            intakeDiagnostics.secondObservationOutcome = results.map { "\($0.payloadPath): \($0.reason)" }.joined(separator: " · ")
+            intakeDiagnostics.scheduledDeadline = nil
+            isExecutingScheduledObservation = false
+            IntakeLifecycleLog.event(instanceID, "scheduled observation outcome recorded")
+        } else {
+            IntakeLifecycleLog.event(instanceID, "initial observation completed")
+        }
         return results
     }
     private func readOnlyLoad(_ configuration: ProductionsConfiguration) { let next = ProductionsLoader(reader: reader).load(configuration: configuration); state = next; message = next.issues.isEmpty ? nil : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"; if selectedID == nil { selectedID = next.work.first?.id ?? next.processing.first?.id ?? next.inbox.first?.id } }
+
+    deinit { IntakeLifecycleLog.event(instanceID, "ViewModel destruction") }
 }
 
 struct ProductionsDashboardView: View {
