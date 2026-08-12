@@ -5,6 +5,48 @@ import XCTest
 final class FlowRegistrationTests: XCTestCase {
     private let date = ISO8601DateFormatter().date(from: "2026-08-11T18:00:00Z")!
 
+    @MainActor
+    func testViewModelInstalledStartupSchedulesAndExecutesProductionCallbackWithoutRefresh() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("view", at: "Office/Inbox/viewmodel.txt")
+        let clock = TestClock(date); let scheduler = ManualIntakeScheduler(); let journal = MemoryJournal()
+        let registration = service(journal: journal, clock: clock)
+        let intake = InboxAutomaticIntake(registration: registration, quiescenceInterval: 2, now: { clock.value })
+        let before = try fixture.snapshot()
+        let model = ProductionsDashboardViewModel(reader: LocalFileSystem(), registrationService: registration, automaticIntake: intake, intakeScheduler: scheduler, now: { clock.value }, initialConfiguration: config(fixture))
+        XCTAssertEqual(try fixture.snapshot(), before, "Construction must be read-only.")
+        XCTAssertNil(model.intakeDiagnostics.firstObservation)
+        model.startAutomaticIntake()
+        XCTAssertEqual(scheduler.pendingCount, 1)
+        XCTAssertNotNil(model.intakeDiagnostics.firstObservation)
+        XCTAssertNotNil(model.intakeDiagnostics.scheduledDeadline)
+        model.startAutomaticIntake(); XCTAssertEqual(scheduler.pendingCount, 1)
+        clock.advance(2); scheduler.runNext()
+        XCTAssertTrue(model.intakeDiagnostics.callbackFired)
+        XCTAssertTrue(model.intakeDiagnostics.secondObservationOutcome?.contains("Registered automatically.") == true)
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).contains("viewmodel.txt"))
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md"), as: UTF8.self).contains("| FLOW | 6 | 2 |"))
+        model.startAutomaticIntake(); XCTAssertEqual(scheduler.pendingCount, 0)
+        let registeredRows = String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self).split(separator: "\n").filter { $0.contains("`Office/Inbox/viewmodel.txt`") }
+        XCTAssertEqual(registeredRows.count, 1)
+    }
+
+    @MainActor
+    func testViewModelDeallocationCancelsPendingScheduledWork() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("view", at: "Office/Inbox/destroy.txt")
+        let scheduler = ManualIntakeScheduler(); let cfg = config(fixture)
+        weak var weakModel: ProductionsDashboardViewModel?
+        do {
+            var model: ProductionsDashboardViewModel? = ProductionsDashboardViewModel(reader: LocalFileSystem(), automaticIntake: InboxAutomaticIntake(quiescenceInterval: 2), intakeScheduler: scheduler, initialConfiguration: cfg)
+            weakModel = model; model?.startAutomaticIntake()
+            XCTAssertEqual(scheduler.pendingCount, 1)
+            model = nil
+        }
+        XCTAssertNil(weakModel)
+        XCTAssertEqual(scheduler.pendingCount, 0)
+    }
+
     func testStartupLifecycleSchedulesSecondObservationAndRegistersWithoutRefresh() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         try fixture.add("file", at: "Office/Inbox/startup.txt")

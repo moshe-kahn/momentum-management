@@ -3,81 +3,86 @@ import SwiftUI
 
 @MainActor
 final class ProductionsDashboardViewModel: ObservableObject {
+    struct IntakeDiagnostics: Equatable {
+        var firstObservation: Date?
+        var scheduledDeadline: Date?
+        var callbackFired = false
+        var secondObservationOutcome: String?
+    }
+
     @Published private(set) var state: ProductionsState?
     @Published var rootPath = ""
     @Published private(set) var message: String?
     @Published private(set) var settingsIssues: [ProductionsIssue] = []
     @Published var selectedID: String?
+    @Published private(set) var intakeResults: [InboxIntakeResult] = []
+    @Published private(set) var intakeDiagnostics = IntakeDiagnostics()
     private let store: ProductionsConfigurationStore
     private let reader: any ProductionsReading
     private let opener: any SourceOpening
     private let registrationService: FlowRegistrationService
     private let automaticIntake: InboxAutomaticIntake
-    private lazy var intakeLifecycle = InboxAutomaticIntakeLifecycle { [weak self] in self?.performAutomaticIntake() ?? [] }
-    @Published private(set) var intakeResults: [InboxIntakeResult] = []
+    private let scheduler: any InboxIntakeScheduling
+    private let now: () -> Date
+    private var intakeLifecycle: InboxAutomaticIntakeLifecycle?
+    private var installedIntakeStarted = false
 
-    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil) {
-        self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService; self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
-        do { if let configuration = try store.load() { rootPath = configuration.productionsRootPath; load(configuration); settingsIssues = state?.issues ?? [] } } catch { message = error.localizedDescription }
+    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
+        self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService
+        self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
+        self.scheduler = intakeScheduler; self.now = now
+        do {
+            let configuration = try initialConfiguration.map { $0 } ?? store.load()
+            if let configuration {
+                rootPath = configuration.productionsRootPath
+                readOnlyLoad(configuration)
+                settingsIssues = state?.issues ?? []
+            }
+        } catch { message = error.localizedDescription }
     }
+
+    /// Called by the installed SwiftUI lifecycle, never from init. It is
+    /// idempotent across repeated appearances and owns the only recheck timer.
+    func startAutomaticIntake() {
+        guard !installedIntakeStarted, state?.issues.isEmpty == true else { return }
+        installedIntakeStarted = true
+        intakeLifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: automaticIntake.quiescenceInterval, didFire: { [weak self] in
+            guard let self else { return }
+            self.intakeDiagnostics.callbackFired = true
+        }, scan: { [weak self] in self?.performAutomaticIntake() ?? [] })
+        intakeResults = intakeLifecycle?.observe() ?? []
+        if intakeResults.contains(where: { $0.outcome == .deferred }) {
+            intakeDiagnostics.firstObservation = now()
+            intakeDiagnostics.scheduledDeadline = now().addingTimeInterval(automaticIntake.quiescenceInterval)
+        }
+    }
+
     func chooseRoot() { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; panel.prompt = "Use Productions Folder"; guard panel.runModal() == .OK, let url = panel.url else { return }; rootPath = url.standardizedFileURL.path; preflightSelection() }
-    func validate() { load(ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)) }
-    func saveAndLoad() {
-        preflightSelection()
-        guard !hasBlockingSettingsIssues else { return }
-        let configuration = ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)
-        do { try store.save(configuration); load(configuration) } catch { message = error.localizedDescription }
-    }
+    func validate() { readOnlyLoad(ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)); observeIntakeIfInstalled() }
+    func saveAndLoad() { preflightSelection(); guard !hasBlockingSettingsIssues else { return }; let configuration = ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath); do { try store.save(configuration); readOnlyLoad(configuration); observeIntakeIfInstalled() } catch { message = error.localizedDescription } }
     func refresh() { validate() }
-    /// Host filesystem watchers call this after Inbox changes; it runs the same
-    /// quiescence-gated automatic intake pass as startup and Refresh.
     func inboxFilesystemDidChange() { validate() }
-    func retryRegistration(payload: FlowItem) {
-        guard let configuration = state?.configuration else { return }
-        let result = automaticIntake.retry(configuration: configuration, payload: payload) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
-        intakeResults = [result]
-        load(configuration)
-    }
-    func retryProblem(for payload: FlowItem) -> String? {
-        guard let result = intakeResults.first(where: { $0.payloadPath == payload.location }) else { return nil }
-        switch result.outcome {
-        case .problem, .investigationRequired, .suspended: return result.reason
-        case .deferred, .registered: return nil
-        }
-    }
-    func registrationPreview(payload: FlowItem, metadata: FlowRegistrationMetadata) throws -> FlowRegistrationPreview {
-        guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }
-        return try registrationService.preview(configuration: configuration, payload: payload, metadata: metadata)
-    }
-    func register(payload: FlowItem, metadata: FlowRegistrationMetadata, preview: FlowRegistrationPreview) throws {
-        guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }
-        try registrationService.commit(configuration: configuration, payload: payload, metadata: metadata, preview: preview) { configuration in
-            ProductionsLoader(reader: self.reader).load(configuration: configuration)
-        }
-        load(configuration)
-    }
+    func retryRegistration(payload: FlowItem) { guard let configuration = state?.configuration else { return }; let result = automaticIntake.retry(configuration: configuration, payload: payload) { ProductionsLoader(reader: self.reader).load(configuration: $0) }; intakeResults = [result]; readOnlyLoad(configuration) }
+    func retryProblem(for payload: FlowItem) -> String? { guard let result = intakeResults.first(where: { $0.payloadPath == payload.location }) else { return nil }; switch result.outcome { case .problem, .investigationRequired, .suspended: return result.reason; case .deferred, .registered: return nil } }
+    func registrationPreview(payload: FlowItem, metadata: FlowRegistrationMetadata) throws -> FlowRegistrationPreview { guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }; return try registrationService.preview(configuration: configuration, payload: payload, metadata: metadata) }
+    func register(payload: FlowItem, metadata: FlowRegistrationMetadata, preview: FlowRegistrationPreview) throws { guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }; try registrationService.commit(configuration: configuration, payload: payload, metadata: metadata, preview: preview) { ProductionsLoader(reader: self.reader).load(configuration: $0) }; readOnlyLoad(configuration) }
     func open(_ relativePath: String, directory: Bool = false) { guard let state else { return }; let url = state.configuration.url(relativePath, directory: directory); guard reader.exists(at: url), reader.isReadable(at: url) else { message = "Source is unavailable: \(relativePath)"; return }; do { try opener.open(url) } catch { message = error.localizedDescription } }
     var blockingSettingsIssues: [ProductionsIssue] { settingsIssues.filter { if case .missing = $0 { return true }; if case .unreadable = $0 { return true }; return false } }
     var hasBlockingSettingsIssues: Bool { !blockingSettingsIssues.isEmpty }
     func preflightSelection() { settingsIssues = ProductionsLoader(reader: reader).load(configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)).issues }
-    private func load(_ configuration: ProductionsConfiguration) {
-        state = ProductionsLoader(reader: reader).load(configuration: configuration)
-        intakeResults = intakeLifecycle.observe()
-        applyLoadedState(configuration)
-    }
+
+    private func observeIntakeIfInstalled() { intakeResults = intakeLifecycle?.observe() ?? [] }
     private func performAutomaticIntake() -> [InboxIntakeResult] {
         guard let configuration = state?.configuration else { return [] }
-        let results = automaticIntake.scan(configuration: configuration, candidates: state?.inbox ?? []) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+        let before = state?.inbox ?? []
+        let results = automaticIntake.scan(configuration: configuration, candidates: before) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
         intakeResults = results
-        applyLoadedState(configuration)
+        readOnlyLoad(configuration)
+        intakeDiagnostics.secondObservationOutcome = results.map { "\($0.payloadPath): \($0.reason)" }.joined(separator: " · ")
+        intakeDiagnostics.scheduledDeadline = nil
         return results
     }
-    private func applyLoadedState(_ configuration: ProductionsConfiguration) {
-        let next = ProductionsLoader(reader: reader).load(configuration: configuration)
-        state = next
-        message = next.issues.isEmpty ? intakeResults.first(where: { if case .suspended = $0.outcome { return true }; return false })?.reason : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"
-        if selectedID == nil { selectedID = next.work.first?.id ?? next.processing.first?.id ?? next.inbox.first?.id }
-    }
+    private func readOnlyLoad(_ configuration: ProductionsConfiguration) { let next = ProductionsLoader(reader: reader).load(configuration: configuration); state = next; message = next.issues.isEmpty ? nil : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"; if selectedID == nil { selectedID = next.work.first?.id ?? next.processing.first?.id ?? next.inbox.first?.id } }
 }
 
 struct ProductionsDashboardView: View {
@@ -100,6 +105,7 @@ struct ProductionsDashboardView: View {
                 Picker("View", selection: $section) { ForEach(sections, id: \.self) { Text($0).tag($0) } }.pickerStyle(.segmented)
                 content
                 if let message = model.message { Text(message).font(.caption).foregroundStyle(.orange) }
+                IntakeDiagnosticsView(diagnostics: model.intakeDiagnostics)
             }
         }
         .padding()
@@ -107,6 +113,7 @@ struct ProductionsDashboardView: View {
         .sheet(isPresented: $isShowingSettings) {
             ProductionsSettingsView(model: model, isPresented: $isShowingSettings)
         }
+        .task { model.startAutomaticIntake() }
     }
     private var setup: some View { VStack(alignment: .leading, spacing: 10) { Text("Configure Productions root").font(.headline); Text("Version 2 reads the shared Productions system. Existing version 1 configuration remains untouched for recovery.").foregroundStyle(.secondary); Text(model.rootPath.isEmpty ? "No root selected" : model.rootPath).font(.caption).textSelection(.enabled); HStack { Button("Choose Productions Folder") { model.chooseRoot() }; Button("Save and Load") { model.saveAndLoad() }.disabled(model.rootPath.isEmpty) }; if let message = model.message { Text(message).foregroundStyle(.orange) } } }
     @ViewBuilder private var content: some View {
@@ -119,6 +126,23 @@ struct ProductionsDashboardView: View {
             case "Threads": ThreadsList(crumbs: state.crumbs, mementos: state.mementos, select: { model.selectedID = $0 })
             default: DetailView(state: state, selectedID: model.selectedID, open: model.open, retry: model.retryRegistration, problem: model.retryProblem)
             }
+        }
+    }
+}
+
+private struct IntakeDiagnosticsView: View {
+    let diagnostics: ProductionsDashboardViewModel.IntakeDiagnostics
+    var body: some View {
+        if diagnostics.firstObservation != nil || diagnostics.callbackFired {
+            HStack(spacing: 10) {
+                Text("Intake diagnostics").font(.caption.weight(.semibold))
+                if let first = diagnostics.firstObservation { Text("first: \(first.formatted(date: .omitted, time: .standard))").font(.caption) }
+                if let deadline = diagnostics.scheduledDeadline { Text("scheduled: \(deadline.formatted(date: .omitted, time: .standard))").font(.caption) }
+                Text(diagnostics.callbackFired ? "callback fired" : "awaiting callback").font(.caption)
+                if let outcome = diagnostics.secondObservationOutcome { Text(outcome).font(.caption).lineLimit(1) }
+            }
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
         }
     }
 }

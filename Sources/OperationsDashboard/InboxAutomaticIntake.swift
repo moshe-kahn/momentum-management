@@ -127,11 +127,13 @@ final class InboxAutomaticIntakeLifecycle {
     private let scheduler: any InboxIntakeScheduling
     private let scan: () -> [InboxIntakeResult]
     private let delay: TimeInterval
+    private let didFire: () -> Void
     private var pending: (any InboxIntakeScheduledWork)?
 
-    init(scheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), delay: TimeInterval = 2, scan: @escaping () -> [InboxIntakeResult]) {
+    init(scheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), delay: TimeInterval = 2, didFire: @escaping () -> Void = {}, scan: @escaping () -> [InboxIntakeResult]) {
         self.scheduler = scheduler
         self.delay = delay
+        self.didFire = didFire
         self.scan = scan
     }
 
@@ -150,6 +152,7 @@ final class InboxAutomaticIntakeLifecycle {
         pending = scheduler.schedule(after: delay) { [weak self] in
             guard let self else { return }
             self.pending = nil
+            self.didFire()
             _ = self.observe()
         }
     }
