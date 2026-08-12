@@ -105,6 +105,7 @@ struct ProductionsDashboardView: View {
     @StateObject private var model = ProductionsDashboardViewModel()
     @State private var section = "Inbox"
     @State private var isShowingSettings = false
+    @State private var isShowingCapture = false
     private let sections = ["Inbox", "Processing", "Canvas", "Work", "Threads", "Detail"]
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -112,6 +113,7 @@ struct ProductionsDashboardView: View {
                 Text("Operations Dashboard").font(.title2)
                 Spacer()
                 Button("Refresh") { model.refresh() }
+                Button("Add to Inbox") { isShowingCapture = true }.disabled(model.state == nil)
                 Button { isShowingSettings = true } label: { Image(systemName: "gearshape") }
                     .accessibilityLabel("Productions settings")
             }
@@ -127,6 +129,9 @@ struct ProductionsDashboardView: View {
         .frame(minWidth: 780, minHeight: 540)
         .sheet(isPresented: $isShowingSettings) {
             ProductionsSettingsView(model: model, isPresented: $isShowingSettings)
+        }
+        .sheet(isPresented: $isShowingCapture) {
+            ProductionsInboxCaptureSheet(rootPath: model.rootPath)
         }
         .task { model.startAutomaticIntake() }
     }

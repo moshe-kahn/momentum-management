@@ -319,31 +319,37 @@ struct EnterpriseInboxCaptureSheet: View {
 
             if let problem = viewModel.configurationProblem {
                 ContentUnavailableView("Capture configuration unavailable", systemImage: "exclamationmark.triangle", description: Text(problem))
+                    .frame(maxHeight: .infinity)
             } else {
-                preparedItemsSection
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        preparedItemsSection
 
-                Picker("Capture mode", selection: $workspace) {
-                    ForEach(CaptureWorkspace.allCases) { mode in Text(mode.title).tag(mode) }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityLabel("Capture mode")
-                .onChange(of: workspace) { _, _ in viewModel.deemphasizeSessionResults() }
+                        Picker("Capture mode", selection: $workspace) {
+                            ForEach(CaptureWorkspace.allCases) { mode in Text(mode.title).tag(mode) }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityLabel("Capture mode")
+                        .onChange(of: workspace) { _, _ in viewModel.deemphasizeSessionResults() }
 
-                if let destinationProblem = viewModel.destinationProblem {
-                    Text(destinationProblem).foregroundStyle(.orange)
-                }
+                        if let destinationProblem = viewModel.destinationProblem {
+                            Text(destinationProblem).foregroundStyle(.orange)
+                        }
 
-                workspaceContent
-                    .frame(height: 330, alignment: .top)
-                Divider()
-                results
-                    .frame(height: 150, alignment: .top)
-                HStack {
-                    Spacer()
-                    Button("Done") { dismiss() }
-                        .disabled(viewModel.isMoveInProgress || viewModel.isPreparedMoveInProgress || viewModel.isQuickCaptureInProgress)
-                        .accessibilityLabel("Close Enterprise Inbox")
+                        workspaceContent
+                            .frame(minHeight: 330, alignment: .top)
+                        Divider()
+                        results
+                            .frame(minHeight: 150, alignment: .top)
+                    }
                 }
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Done") { dismiss() }
+                    .disabled(viewModel.isMoveInProgress || viewModel.isPreparedMoveInProgress || viewModel.isQuickCaptureInProgress)
+                    .accessibilityLabel("Close Enterprise Inbox")
             }
         }
         .padding()
