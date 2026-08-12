@@ -24,15 +24,30 @@ final class ProductionsInboxCaptureTests: XCTestCase {
         XCTAssertEqual(service.copyManual(source: folder, productionsRoot: fixture.root), .rejected("Inbox already contains an item named folder."))
         XCTAssertFalse(fixture.manager.fileExists(atPath: fixture.inbox.appending(path: "folder (2)").path))
     }
-    func testTypedNoteIsMarkdownAndRejectsBlankAndExactCollision() throws {
+    func testTypedNoteWithoutTerminalNewlineAppendsOneRealNewline() throws {
+        try assertExactTypedNote(input: "no terminal newline", expectedBody: "no terminal newline\n", date: Date(timeIntervalSince1970: 0))
+    }
+    func testTypedNoteWithOneTerminalNewlinePreservesIt() throws {
+        try assertExactTypedNote(input: "one terminal newline\n", expectedBody: "one terminal newline\n", date: Date(timeIntervalSince1970: 1))
+    }
+    func testTypedNotePreservesMultipleLinesVerbatimAndAppendsTerminalNewline() throws {
+        try assertExactTypedNote(input: "first line\nsecond line\nthird line", expectedBody: "first line\nsecond line\nthird line\n", date: Date(timeIntervalSince1970: 2))
+    }
+    func testTypedNoteRejectsBlankInputWithoutCreatingPayload() throws {
         let fixture = try CaptureFixture(); defer { fixture.remove() }
-        var service = ProductionsInboxCaptureService(); let date = Date(timeIntervalSince1970: 0)
-        XCTAssertEqual(service.createTypedNote(text: "  ", productionsRoot: fixture.root, now: date), .rejected("Enter a nonblank note."))
-        let first = service.createTypedNote(text: "hello", productionsRoot: fixture.root, now: date)
-        guard case let .captured(url) = first else { return XCTFail("Expected note") }
-        XCTAssertTrue(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("# Quick Capture"))
-        XCTAssertTrue(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("hello"))
-        XCTAssertEqual(service.createTypedNote(text: "again", productionsRoot: fixture.root, now: date), .rejected("Inbox already contains \(url.lastPathComponent)."))
+        var service = ProductionsInboxCaptureService()
+        XCTAssertEqual(service.createTypedNote(text: "  \n\t ", productionsRoot: fixture.root, now: .distantPast), .rejected("Enter a nonblank note."))
+        XCTAssertTrue(try fixture.manager.contentsOfDirectory(atPath: fixture.inbox.path).isEmpty)
+    }
+    private func assertExactTypedNote(input: String, expectedBody: String, date: Date, file: StaticString = #filePath, line: UInt = #line) throws {
+        let fixture = try CaptureFixture(); defer { fixture.remove() }
+        var service = ProductionsInboxCaptureService()
+        guard case let .captured(url) = service.createTypedNote(text: input, productionsRoot: fixture.root, now: date) else { return XCTFail("Expected typed note", file: file, line: line) }
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withDashSeparatorInDate, .withColonSeparatorInTime]
+        let expected = "# Quick Capture\n\nCreated: \(formatter.string(from: date))\nSource: Operations Dashboard\n\n\(expectedBody)"
+        let bytes = try Data(contentsOf: url)
+        XCTAssertEqual(bytes, Data(expected.utf8), file: file, line: line)
+        XCTAssertNotEqual(Array(bytes.suffix(2)), [0x5C, 0x6E], "Quick Capture must not end with literal \\n.", file: file, line: line)
     }
     func testAutomaticCaptureDefersThenMovesStableItemsInPathOrderWithoutFlowWrites() throws {
         let fixture = try CaptureFixture(); defer { fixture.remove() }

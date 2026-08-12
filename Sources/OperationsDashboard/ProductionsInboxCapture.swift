@@ -42,7 +42,7 @@ struct ProductionsInboxCaptureService {
         let stamp = formatter.string(from: now).replacingOccurrences(of: ":", with: "-")
         let destination = inbox.appending(path: "Quick Capture \(stamp).md")
         guard !manager.fileExists(atPath: destination.path) else { return .rejected("Inbox already contains \(destination.lastPathComponent).") }
-        let contents = "# Quick Capture\n\nCreated: \(formatter.string(from: now))\nSource: Operations Dashboard\n\n\(text.hasSuffix("\\n") ? text : text + "\\n")"
+        let contents = "# Quick Capture\n\nCreated: \(formatter.string(from: now))\nSource: Operations Dashboard\n\n\(text.hasSuffix("\n") ? text : text + "\n")"
         do { try Data(contents.utf8).write(to: destination, options: .withoutOverwriting); return .captured(destination) }
         catch { return .rejected("Quick Capture failed: \(error.localizedDescription)") }
     }
