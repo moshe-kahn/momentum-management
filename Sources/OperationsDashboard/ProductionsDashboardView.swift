@@ -121,7 +121,6 @@ struct ProductionsDashboardView: View {
                 Picker("View", selection: $section) { ForEach(sections, id: \.self) { Text($0).tag($0) } }.pickerStyle(.segmented)
                 content
                 if let message = model.message { Text(message).font(.caption).foregroundStyle(.orange) }
-                IntakeDiagnosticsView(diagnostics: model.intakeDiagnostics)
             }
         }
         .padding()
@@ -142,23 +141,6 @@ struct ProductionsDashboardView: View {
             case "Threads": ThreadsList(crumbs: state.crumbs, mementos: state.mementos, select: { model.selectedID = $0 })
             default: DetailView(state: state, selectedID: model.selectedID, open: model.open, retry: model.retryRegistration, problem: model.retryProblem)
             }
-        }
-    }
-}
-
-private struct IntakeDiagnosticsView: View {
-    let diagnostics: ProductionsDashboardViewModel.IntakeDiagnostics
-    var body: some View {
-        if diagnostics.firstObservation != nil || diagnostics.callbackFired {
-            HStack(spacing: 10) {
-                Text("Intake diagnostics").font(.caption.weight(.semibold))
-                if let first = diagnostics.firstObservation { Text("first: \(first.formatted(date: .omitted, time: .standard))").font(.caption) }
-                if let deadline = diagnostics.scheduledDeadline { Text("scheduled: \(deadline.formatted(date: .omitted, time: .standard))").font(.caption) }
-                Text(diagnostics.callbackFired ? "callback fired" : "awaiting callback").font(.caption)
-                if let outcome = diagnostics.secondObservationOutcome { Text(outcome).font(.caption).lineLimit(1) }
-            }
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
         }
     }
 }
