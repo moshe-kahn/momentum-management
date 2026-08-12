@@ -49,11 +49,13 @@ final class ProductionsDashboardViewModel: ObservableObject {
         intakeLifecycle = InboxAutomaticIntakeLifecycle(scheduler: scheduler, delay: automaticIntake.quiescenceInterval, didFire: { [weak self] in
             guard let self else { return }
             self.intakeDiagnostics.callbackFired = true
+            print("Operations Dashboard intake diagnostic: scheduled callback fired")
         }, scan: { [weak self] in self?.performAutomaticIntake() ?? [] })
         intakeResults = intakeLifecycle?.observe() ?? []
         if intakeResults.contains(where: { $0.outcome == .deferred }) {
             intakeDiagnostics.firstObservation = now()
             intakeDiagnostics.scheduledDeadline = now().addingTimeInterval(automaticIntake.quiescenceInterval)
+            print("Operations Dashboard intake diagnostic: first observation; recheck scheduled")
         }
     }
 
@@ -80,6 +82,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
         readOnlyLoad(configuration)
         intakeDiagnostics.secondObservationOutcome = results.map { "\($0.payloadPath): \($0.reason)" }.joined(separator: " · ")
         intakeDiagnostics.scheduledDeadline = nil
+        print("Operations Dashboard intake diagnostic: second observation outcome: \(intakeDiagnostics.secondObservationOutcome ?? "none")")
         return results
     }
     private func readOnlyLoad(_ configuration: ProductionsConfiguration) { let next = ProductionsLoader(reader: reader).load(configuration: configuration); state = next; message = next.issues.isEmpty ? nil : "\(next.issues.count) contract issue\(next.issues.count == 1 ? "" : "s")"; if selectedID == nil { selectedID = next.work.first?.id ?? next.processing.first?.id ?? next.inbox.first?.id } }
