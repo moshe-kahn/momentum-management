@@ -94,6 +94,7 @@ final class SyntheticProductionsFixture {
     func add(_ text: String, at path: String) throws { try write(text, path) }
     func replaceFlow(_ text: String) { try? write(text, "Office/Flow.md") }
     func replaceLedger(_ text: String) { try? write(text, "Warehouse/Reference/Identifier Ledger.md") }
+    func replaceCanvas(_ text: String) { try? write(text, "Office/Threads/Canvas.md") }
     func data(at path: String) throws -> Data { try Data(contentsOf: root.appending(path: path)) }
     func snapshot() throws -> [String: Data] { let files = try manager.subpathsOfDirectory(atPath: root.path).sorted(); return try Dictionary(uniqueKeysWithValues: files.map { path in let url = root.appending(path: path); return (path, (try? Data(contentsOf: url)) ?? Data()) }) }
     private func write(_ text: String, _ path: String) throws { let url = root.appending(path: path); try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true); try Data(text.utf8).write(to: url) }
