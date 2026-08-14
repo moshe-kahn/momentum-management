@@ -282,6 +282,102 @@ final class FlowRegistrationTests: XCTestCase {
         XCTAssertTrue(fixture.load().issues.isEmpty)
     }
 
+    func testRegistrationInsertsBeforeTrailingProseAndFullReloadRecognizesExactRow() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("new", at: "Office/Inbox/trailing.txt")
+        let originalFlow = "# Flow\n\n" + fixture.flow + "\n\n## Rules\n\nUnknown content must survive.\n"
+        fixture.replaceFlow(originalFlow)
+        let originalLedger = try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md")
+        let originalPayload = try fixture.data(at: "Office/Inbox/trailing.txt")
+        let journal = MemoryJournal(); let svc = service(journal: journal)
+        let item = try payload(fixture, "trailing.txt")
+
+        let preview = try svc.preview(configuration: config(fixture), payload: item, metadata: metadata())
+        try svc.commit(configuration: config(fixture), payload: item, metadata: metadata(), preview: preview, reload: { _ in fixture.load() })
+
+        let replacement = String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self)
+        XCTAssertEqual(replacement.replacingOccurrences(of: preview.row + "\n", with: ""), originalFlow)
+        XCTAssertEqual(replacement.split(separator: "\n", omittingEmptySubsequences: false).filter { String($0) == preview.row }.count, 1)
+        XCTAssertLessThan(try XCTUnwrap(replacement.range(of: preview.row)?.lowerBound), try XCTUnwrap(replacement.range(of: "## Rules")?.lowerBound))
+        XCTAssertEqual(replacement.components(separatedBy: "| FLOW-000001 | Inbox item |").count - 1, 1)
+        XCTAssertEqual(replacement.components(separatedBy: "| BND-000001 | Bundle |").count - 1, 1)
+
+        let state = fixture.load()
+        let registered = try XCTUnwrap(state.inbox.first { $0.location == "Office/Inbox/trailing.txt" })
+        XCTAssertEqual(registered.flowID, preview.flowID)
+        XCTAssertFalse(registered.isUnregistered)
+        XCTAssertTrue(state.issues.isEmpty, state.issues.map(\.message).joined(separator: "\n"))
+        XCTAssertEqual(try fixture.data(at: "Office/Inbox/trailing.txt"), originalPayload)
+        XCTAssertEqual(journal.journals.count, 1)
+        XCTAssertEqual(journal.journals.first?.flowPreimage, Data(originalFlow.utf8))
+        XCTAssertEqual(journal.journals.first?.ledgerPreimage, originalLedger)
+        XCTAssertEqual(journal.journals.first?.terminalState, .bothFilesCommitted)
+    }
+
+    func testRegistrationInsertsAtEndOfFlowWithoutChangingTerminalNewlinePolicy() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("new", at: "Office/Inbox/end.txt")
+        let originalFlow = fixture.flow
+        XCTAssertFalse(originalFlow.hasSuffix("\n"))
+        let svc = service(journal: MemoryJournal()); let item = try payload(fixture, "end.txt")
+
+        let preview = try svc.preview(configuration: config(fixture), payload: item, metadata: metadata())
+        try svc.commit(configuration: config(fixture), payload: item, metadata: metadata(), preview: preview, reload: { _ in fixture.load() })
+
+        let replacement = String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self)
+        XCTAssertEqual(replacement, originalFlow + "\n" + preview.row)
+        XCTAssertFalse(replacement.hasSuffix("\n"))
+        XCTAssertEqual(fixture.load().inbox.first { $0.location == "Office/Inbox/end.txt" }?.flowID, preview.flowID)
+    }
+
+    func testRegistrationPreservesCRLFLineEndingsAndTrailingContent() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("new", at: "Office/Inbox/crlf.txt")
+        let originalFlow = fixture.flow.replacingOccurrences(of: "\n", with: "\r\n") + "\r\n\r\n## Rules\r\nPreserve this.\r\n"
+        fixture.replaceFlow(originalFlow)
+        let item = FlowItem(viewIdentity: "crlf", flowID: nil, label: "crlf.txt", type: "Unregistered", stage: "Inbox", priority: "", location: "Office/Inbox/crlf.txt", summary: "", bundleContent: nil)
+        let svc = service(journal: MemoryJournal())
+
+        let preview = try svc.preview(configuration: config(fixture), payload: item, metadata: metadata())
+        try svc.commit(configuration: config(fixture), payload: item, metadata: metadata(), preview: preview, reload: { configuration in
+            ProductionsState(configuration: configuration, inbox: [], processing: [], work: [], canvas: [], crumbs: [], mementos: [], issues: [])
+        })
+
+        let replacement = String(decoding: try fixture.data(at: "Office/Flow.md"), as: UTF8.self)
+        XCTAssertEqual(replacement.replacingOccurrences(of: preview.row + "\r\n", with: ""), originalFlow)
+        XCTAssertFalse(replacement.replacingOccurrences(of: "\r\n", with: "").contains("\n"))
+        XCTAssertLessThan(try XCTUnwrap(replacement.range(of: preview.row)?.lowerBound), try XCTUnwrap(replacement.range(of: "## Rules")?.lowerBound))
+    }
+
+    func testMissingDuplicateAmbiguousMalformedAndNoncanonicalTableBoundariesAreRejectedBeforeJournal() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        try fixture.add("new", at: "Office/Inbox/boundary.txt")
+        let item = FlowItem(viewIdentity: "boundary", flowID: nil, label: "boundary.txt", type: "Unregistered", stage: "Inbox", priority: "", location: "Office/Inbox/boundary.txt", summary: "", bundleContent: nil)
+        let fixtureLines = fixture.flow.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let header = fixtureLines[0]
+        let orphan = "| FLOW-999999 | Orphan | Note | Inbox | Low | Office | Office | — | test | — | `Office/Inbox/orphan.txt` | Orphan | Review | 2026-08-11 | 2026-08-11 |"
+        let cases: [(String, String)] = [
+            ("missing", "# Flow\n\nNo canonical table."),
+            ("duplicate", fixture.flow + "\n\n" + fixture.flow),
+            ("ambiguous orphan", fixture.flow + "\n\n## Rules\n" + orphan),
+            ("malformed separator", header + "\n| --- |"),
+            ("noncanonical boundary", fixture.flow + "\n " + orphan)
+        ]
+
+        for (name, flow) in cases {
+            fixture.replaceFlow(flow)
+            let before = try fixture.snapshot()
+            let journal = MemoryJournal()
+            XCTAssertThrowsError(try service(journal: journal).preview(configuration: config(fixture), payload: item, metadata: metadata()), name) { error in
+                guard case FlowRegistrationError.invalidMetadata = error else {
+                    return XCTFail("Expected invalid Flow schema for \(name), got \(error)")
+                }
+            }
+            XCTAssertTrue(journal.journals.isEmpty, name)
+            XCTAssertEqual(try fixture.snapshot(), before, name)
+        }
+    }
+
     func testSharedTimestampIsUsedForCreatedUpdatedAndJournal() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         try fixture.add("new", at: "Office/Inbox/time.txt")

@@ -312,16 +312,125 @@ struct FlowRegistrationService {
         return "| " + cells.joined(separator: " | ") + " |"
     }
 
-    private func append(row: String, to flow: String) throws -> String { flow.hasSuffix("\n") ? flow + row + "\n" : flow + "\n" + row + "\n" }
+    private struct FlowLine {
+        let content: String
+        let range: Range<String.Index>
+        let terminator: String
+    }
+
+    private struct FlowTableLayout {
+        let lines: [FlowLine]
+        let headerIndex: Int
+        let separatorIndex: Int
+        let boundaryIndex: Int
+
+        var dataRange: Range<Int> { (separatorIndex + 1)..<boundaryIndex }
+    }
+
+    private var expectedFlowHeader: [String] {
+        ["Entry ID", "Label", "Type", "Stage", "Priority", "Steward", "Department", "Product", "Source", "Related work", "Location", "Summary", "Next disposition", "Created", "Updated"]
+    }
+
+    private func append(row: String, to flow: String) throws -> String {
+        let table = try flowTable(in: flow)
+        let precedingLine = table.lines[table.boundaryIndex - 1]
+        let tableLineEnding = table.lines[table.headerIndex].terminator.isEmpty
+            ? table.lines[table.separatorIndex].terminator
+            : table.lines[table.headerIndex].terminator
+        let lineEnding = precedingLine.terminator.isEmpty
+            ? (tableLineEnding.isEmpty ? "\n" : tableLineEnding)
+            : precedingLine.terminator
+        let insertion = precedingLine.terminator.isEmpty ? lineEnding + row : row + lineEnding
+        var replacement = flow
+        replacement.insert(contentsOf: insertion, at: precedingLine.range.upperBound)
+        return replacement
+    }
 
     private func validateFlowReplacement(_ flow: String, appendedRow: String) throws {
-        let rows = flow.split(separator: "\n").map(String.init).filter { $0.hasPrefix("|") && !$0.contains("---") }
-        let expectedHeader = ["Entry ID", "Label", "Type", "Stage", "Priority", "Steward", "Department", "Product", "Source", "Related work", "Location", "Summary", "Next disposition", "Created", "Updated"]
-        guard rows.first.map(MarkdownTable.cells) == expectedHeader,
-              rows.allSatisfy({ MarkdownTable.cells($0).count == 15 }),
-              MarkdownTable.cells(appendedRow).count == 15 else {
+        guard MarkdownTable.cells(appendedRow).count == expectedFlowHeader.count else {
             throw FlowRegistrationError.invalidMetadata("Every Flow row must contain exactly 15 columns in the required schema.")
         }
+        let table = try flowTable(in: flow)
+        let occurrences = table.lines.enumerated().filter { $0.element.content == appendedRow }
+        guard occurrences.count == 1, table.dataRange.contains(occurrences[0].offset) else {
+            throw FlowRegistrationError.invalidMetadata("The appended Flow row must occur exactly once inside the canonical Flow table.")
+        }
+    }
+
+    private func flowTable(in flow: String) throws -> FlowTableLayout {
+        let lines = flowLines(in: flow)
+        let flowHeaderIndexes = lines.indices.filter { index in
+            let line = lines[index].content
+            guard line.hasPrefix("|"), line.hasSuffix("|") else { return false }
+            let cells = MarkdownTable.cells(line)
+            return cells.count == expectedFlowHeader.count && Set(cells) == Set(expectedFlowHeader)
+        }
+        guard flowHeaderIndexes.count == 1,
+              let headerIndex = flowHeaderIndexes.first,
+              MarkdownTable.cells(lines[headerIndex].content) == expectedFlowHeader else {
+            throw FlowRegistrationError.invalidMetadata("Flow must contain exactly one canonical 15-column table header.")
+        }
+
+        let separatorIndex = headerIndex + 1
+        guard lines.indices.contains(separatorIndex), isCanonicalSeparator(lines[separatorIndex].content) else {
+            throw FlowRegistrationError.invalidMetadata("The canonical Flow table separator is missing or malformed.")
+        }
+
+        var boundaryIndex = separatorIndex + 1
+        while lines.indices.contains(boundaryIndex) {
+            let line = lines[boundaryIndex].content
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("|") else { break }
+            guard line.hasPrefix("|"), line.hasSuffix("|") else {
+                throw FlowRegistrationError.invalidMetadata("The canonical Flow table has a noncanonical boundary.")
+            }
+            let cells = MarkdownTable.cells(line)
+            guard cells.count == expectedFlowHeader.count,
+                  cells != expectedFlowHeader,
+                  !isSeparator(cells) else {
+                throw FlowRegistrationError.invalidMetadata("Every Flow row must contain exactly 15 columns in the required schema.")
+            }
+            boundaryIndex += 1
+        }
+
+        let tableRange = headerIndex..<boundaryIndex
+        for index in lines.indices where !tableRange.contains(index) {
+            let line = lines[index].content.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("|"), line.hasSuffix("|"), let identifier = MarkdownTable.cells(line).first else { continue }
+            if identifier.range(of: #"^(FLOW|BND)-[0-9]{6,}$"#, options: .regularExpression) != nil {
+                throw FlowRegistrationError.invalidMetadata("A Flow data row occurs outside the canonical Flow table.")
+            }
+        }
+
+        return FlowTableLayout(lines: lines, headerIndex: headerIndex, separatorIndex: separatorIndex, boundaryIndex: boundaryIndex)
+    }
+
+    private func isCanonicalSeparator(_ line: String) -> Bool {
+        line.hasPrefix("|") && line.hasSuffix("|") && isSeparator(MarkdownTable.cells(line))
+    }
+
+    private func isSeparator(_ cells: [String]) -> Bool {
+        cells.count == expectedFlowHeader.count && cells.allSatisfy {
+            $0.range(of: #"^:?-{3,}:?$"#, options: .regularExpression) != nil
+        }
+    }
+
+    private func flowLines(in text: String) -> [FlowLine] {
+        var lines: [FlowLine] = []
+        var lineStart = text.startIndex
+        while lineStart < text.endIndex {
+            var contentEnd = lineStart
+            while contentEnd < text.endIndex, !text[contentEnd].isNewline {
+                contentEnd = text.index(after: contentEnd)
+            }
+            var lineEnd = contentEnd
+            if lineEnd < text.endIndex {
+                lineEnd = text.index(after: lineEnd)
+            }
+            lines.append(FlowLine(content: String(text[lineStart..<contentEnd]), range: lineStart..<lineEnd, terminator: String(text[contentEnd..<lineEnd])))
+            lineStart = lineEnd
+        }
+        return lines
     }
 
     private func flowReferences(_ payloadPath: String, in flow: String) -> Bool {
