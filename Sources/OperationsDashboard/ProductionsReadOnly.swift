@@ -102,7 +102,56 @@ enum WorkKind: String, CaseIterable, Identifiable {
         }
     }
 }
-struct WorkItem: Identifiable, Equatable { let id: String; let kind: WorkKind; let title, lifecycle, priority, lead, department, product, workspacePath: String; let related: [String]; let content: String? }
+struct WorkspaceRecord: Equatable {
+    let fields: [String: String]
+    let sections: [String: String]
+    let currentMemento: CurrentMemento?
+
+    func field(_ name: String) -> String { fields[name] ?? "" }
+    func section(_ name: String) -> String { sections[name] ?? "" }
+}
+
+struct CurrentMemento: Equatable {
+    let id: String
+    let created: String
+    let currentState: String
+    let naturalResumePoint: String
+    let openCrumbs: [String]
+    let extendedPayload: String?
+}
+
+struct ProductRecord: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let lifecycle: String
+    let lead: String
+    let related: [String]
+    let canonicalWorkspace: String
+}
+
+struct WorkItem: Identifiable, Equatable {
+    let id: String
+    let kind: WorkKind
+    let title: String
+    let lifecycle: String
+    let priority: String
+    let lead: String
+    let department: String
+    let product: String
+    let workspacePath: String
+    let related: [String]
+    let dependencies: [String]
+    let registryDescription: String
+    let content: String?
+    let workspace: WorkspaceRecord?
+
+    init(id: String, kind: WorkKind, title: String, lifecycle: String, priority: String, lead: String, department: String, product: String, workspacePath: String, related: [String], dependencies: [String] = [], registryDescription: String = "", content: String?, workspace: WorkspaceRecord? = nil) {
+        self.id = id; self.kind = kind; self.title = title; self.lifecycle = lifecycle
+        self.priority = priority; self.lead = lead; self.department = department; self.product = product
+        self.workspacePath = workspacePath; self.related = related; self.dependencies = dependencies
+        self.registryDescription = registryDescription; self.content = content; self.workspace = workspace
+    }
+}
 struct FlowItem: Identifiable, Equatable {
     /// `id` is a view identity only. Unregistered payloads have no Flow identifier.
     let viewIdentity: String
@@ -114,9 +163,29 @@ struct FlowItem: Identifiable, Equatable {
 }
 struct CanvasEvent: Equatable { let occurred: Date; let workID, event, reason, context: String; let sequence: Int }
 struct Crumb: Identifiable, Equatable { let id, kind, target, priority, summary, location: String }
-struct Memento: Identifiable, Equatable { let id, target, summary, resumePoint, location: String }
+struct Memento: Identifiable, Equatable {
+    let id, target, summary, resumePoint, created, location: String
+    let currentState, naturalResumePoint: String
+    let openCrumbs: [String]
+    let extendedPayloadPath: String?
+    let extendedPayloadContent: String?
+}
 struct ProductionsState: Equatable {
-    let configuration: ProductionsConfiguration; let inbox: [FlowItem]; let processing: [FlowItem]; let work: [WorkItem]; let canvas: [CanvasEvent]; let crumbs: [Crumb]; let mementos: [Memento]; let issues: [ProductionsIssue]
+    let configuration: ProductionsConfiguration
+    let inbox: [FlowItem]
+    let processing: [FlowItem]
+    let work: [WorkItem]
+    let products: [ProductRecord]
+    let canvas: [CanvasEvent]
+    let crumbs: [Crumb]
+    let mementos: [Memento]
+    let issues: [ProductionsIssue]
+
+    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], issues: [ProductionsIssue]) {
+        self.configuration = configuration; self.inbox = inbox; self.processing = processing
+        self.work = work; self.products = products; self.canvas = canvas; self.crumbs = crumbs
+        self.mementos = mementos; self.issues = issues
+    }
     var canvasCurrentIDs: Set<String> { Set(canvas.sorted { $0.sequence < $1.sequence }.reduce(into: [String: String]()) { if $1.event == "Placed" || $1.event == "Cleared" { $0[$1.workID] = $1.event } }.filter { $0.value == "Placed" }.map(\.key)) }
 }
 
@@ -133,7 +202,10 @@ struct ProductionsLoader {
         let registryDefinitions: [(ProductionsPath, WorkKind, [String])] = [(.tasks, .task, ["Task ID", "Title", "State", "Priority", "Current lead", "Initiative", "Project", "Depends on", "Workspace"]), (.ideas, .idea, ["Idea ID", "Title", "Disposition", "Priority", "Current lead", "Related records", "Workspace"]), (.projects, .project, ["Project ID", "Title", "State", "Priority", "Current lead", "Related records", "Depends on", "Workspace"]), (.initiatives, .initiative, ["Initiative ID", "Title", "State", "Priority", "Current lead", "Related records", "Workspace"])]
         var work: [WorkItem] = []
         for (path, kind, headers) in registryDefinitions { work += parseWork(table(at: path, configuration: validated, required: headers, issues: &issues), kind: kind, configuration: validated, issues: &issues) }
-        _ = table(at: .products, configuration: validated, required: ["Product ID", "Product", "Lifecycle", "Current lead", "Related initiatives / products", "Canonical workspace"], issues: &issues)
+        let duplicateWorkIDs = Dictionary(grouping: work, by: \.id).filter { $0.value.count > 1 }.keys
+        for id in duplicateWorkIDs { issues.append(.duplicate("Registry work ID \(id)")) }
+        work = work.reduce(into: []) { result, item in if !result.contains(where: { $0.id == item.id }) { result.append(item) } }
+        let products = parseProducts(table(at: .products, configuration: validated, required: ["Product ID", "Product", "Lifecycle", "Current lead", "Related initiatives / products", "Canonical workspace"], issues: &issues), issues: &issues)
         _ = table(at: .departments, configuration: validated, required: ["Department", "Function"], issues: &issues)
         let workByID = Dictionary(uniqueKeysWithValues: work.map { ($0.id, $0) })
         let flow = parseFlow(flowRows, configuration: validated, issues: &issues)
@@ -141,8 +213,8 @@ struct ProductionsLoader {
         let canvas = parseCanvas(table(at: .canvas, configuration: validated, required: ["Occurred", "Work ID", "Event", "Reason", "Context"], issues: &issues), work: workByID, issues: &issues)
         let validTargets = Set(workByID.keys).union(flow.filter { $0.stage == "Processing" }.map(\.id))
         let crumbs = parseCrumbs(table(at: .crumbs, configuration: validated, required: ["Crumb ID", "Kind", "Target", "Priority", "Summary", "Created", "Location"], issues: &issues), targets: validTargets, configuration: validated, issues: &issues)
-        let mementos = parseMementos(table(at: .mementos, configuration: validated, required: ["Memento ID", "Target", "Summary", "Resume point", "Created", "Location"], issues: &issues), targets: validTargets, configuration: validated, issues: &issues)
-        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, canvas: canvas, crumbs: crumbs, mementos: mementos, issues: issues)
+        let mementos = parseMementos(table(at: .mementos, configuration: validated, required: ["Memento ID", "Target", "Summary", "Resume point", "Created", "Location"], issues: &issues), work: workByID, processing: flow.filter { $0.stage == "Processing" }, crumbs: crumbs, configuration: validated, issues: &issues)
+        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, canvas: canvas, crumbs: crumbs, mementos: mementos, issues: issues)
     }
 
     private func validatePath(_ path: ProductionsPath, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) { let url = configuration.url(path.rawValue, directory: path == .inbox || path == .processing); if !reader.exists(at: url) { issues.append(.missing(path.rawValue)) } else if !reader.isReadable(at: url) { issues.append(.unreadable(path.rawValue)) } }
@@ -154,17 +226,39 @@ struct ProductionsLoader {
     private func parseWork(_ rows: [[String: String]], kind: WorkKind, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [WorkItem] { rows.compactMap { row in
         let id = row["\(kind.rawValue) ID"] ?? ""; guard identifier(id, prefix: kind.identifierPrefix) else { issues.append(.malformed("invalid \(kind.rawValue) ID \(id)")); return nil }
         let workspace = MarkdownTable.resolvedPath(row["Workspace"] ?? "", relativeTo: "Office/Registry"); let expected = "Workspace/\(id)/\(id).md"; guard workspace == expected else { issues.append(.mismatch("\(id) Workspace link")); return nil }
-        let url = configuration.url(workspace); guard reader.exists(at: url), reader.isReadable(at: url) else { issues.append(.unresolved("\(id) Workspace")); return nil }
+        let url = configuration.url(workspace); guard safeRootPath(workspace, configuration: configuration), reader.exists(at: url), reader.isReadable(at: url) else { issues.append(.unresolved("\(id) Workspace")); return nil }
         let content = try? String(decoding: reader.readData(at: url), as: UTF8.self)
-        let lifecycle = row["State"] ?? row["Disposition"] ?? ""; let related = MarkdownTable.values(row["Related records"] ?? row["Depends on"] ?? "")
-        return WorkItem(id: id, kind: kind, title: row["Title"] ?? "", lifecycle: lifecycle, priority: row["Priority"] ?? "", lead: row["Current lead"] ?? "", department: "", product: "", workspacePath: workspace, related: related, content: content)
+        let parsedWorkspace: WorkspaceRecord?
+        do { parsedWorkspace = try content.map(WorkspaceMarkdown.parse) }
+        catch { issues.append(.malformed("\(id) Workspace: \(error.localizedDescription)")); parsedWorkspace = nil }
+        let lifecycle = row["State"] ?? row["Disposition"] ?? ""
+        let directRelated = MarkdownTable.values(row["Related records"] ?? "") + MarkdownTable.values(row["Source artifacts"] ?? "")
+        let structuralRelated = MarkdownTable.values(row["Initiative"] ?? "") + MarkdownTable.values(row["Project"] ?? "")
+        let dependencies = MarkdownTable.values(row["Depends on"] ?? "")
+        let product = parsedWorkspace?.field("Associated product(s)").nilIfEmpty ?? parsedWorkspace?.field("Associated product").nilIfEmpty ?? ""
+        let department = parsedWorkspace?.field("Primary department").nilIfEmpty ?? ""
+        return WorkItem(id: id, kind: kind, title: row["Title"] ?? "", lifecycle: lifecycle, priority: row["Priority"] ?? "", lead: row["Current lead"] ?? "", department: department, product: product, workspacePath: workspace, related: directRelated + structuralRelated, dependencies: dependencies, registryDescription: row["Short description"] ?? "", content: content, workspace: parsedWorkspace)
     } }
+
+    private func parseProducts(_ rows: [[String: String]], issues: inout [ProductionsIssue]) -> [ProductRecord] {
+        var ids = Set<String>()
+        return rows.compactMap { row in
+            let id = row["Product ID"] ?? ""
+            guard identifier(id, prefix: "PROD") else { issues.append(.malformed("invalid Product ID \(id)")); return nil }
+            guard ids.insert(id).inserted else { issues.append(.duplicate("Product \(id)")); return nil }
+            let workspace = MarkdownTable.rootPath(row["Canonical workspace"] ?? "")
+            guard !workspace.isEmpty else { issues.append(.malformed("Product \(id) canonical workspace")); return nil }
+            return ProductRecord(id: id, name: row["Product"] ?? "", lifecycle: row["Lifecycle"] ?? "", lead: row["Current lead"] ?? "", related: MarkdownTable.values(row["Related initiatives / products"] ?? ""), canonicalWorkspace: workspace)
+        }
+    }
     private func parseFlow(_ rows: [[String: String]], configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [FlowItem] { rows.compactMap { row in
         let id = row["Entry ID"] ?? ""; let stage = row["Stage"] ?? ""; guard (stage == "Inbox" && identifier(id, prefix: "FLOW")) || (stage == "Processing" && identifier(id, prefix: "BND")) else { issues.append(.malformed("Flow \(id) stage or identifier")); return nil }
-        let location = MarkdownTable.rootPath(row["Location"] ?? ""); let url = configuration.url(location, directory: stage == "Processing"); guard reader.exists(at: url) else { issues.append(.unresolved("Flow \(id) location")); return nil }
+        let rawLocation = MarkdownTable.rootPath(row["Location"] ?? "")
+        let location = stage == "Processing" ? rawLocation.trimmingCharacters(in: CharacterSet(charactersIn: "/")) : rawLocation
+        let url = configuration.url(location, directory: stage == "Processing"); guard safeRootPath(location, configuration: configuration), reader.exists(at: url) else { issues.append(.unresolved("Flow \(id) location")); return nil }
         if stage == "Inbox", !isImmediateInboxPayload(location) { issues.append(.mismatch("Flow \(id) Inbox location")); return nil }
         if stage == "Processing", location.hasPrefix("Office/Inbox/") { issues.append(.mismatch("Flow \(id) Processing location")); return nil }
-        var bundle: String?; if stage == "Processing" { let record = url.appending(path: "\(id).md"); guard reader.exists(at: record), reader.isReadable(at: record) else { issues.append(.unresolved("\(id) bundle record")); return nil }; bundle = try? String(decoding: reader.readData(at: record), as: UTF8.self); if !(bundle?.contains("## Bundle Record") == true && bundle?.contains("## Processing State") == true && bundle?.contains("## Contents") == true) { issues.append(.malformed("\(id) bundle sections")) } }
+        var bundle: String?; if stage == "Processing" { let recordPath = "\(location)/\(id).md", record = configuration.url(recordPath); guard safeRootPath(recordPath, configuration: configuration), reader.exists(at: record), reader.isReadable(at: record) else { issues.append(.unresolved("\(id) bundle record")); return nil }; bundle = try? String(decoding: reader.readData(at: record), as: UTF8.self); if !(bundle?.contains("## Bundle Record") == true && bundle?.contains("## Processing State") == true && bundle?.contains("## Contents") == true) { issues.append(.malformed("\(id) bundle sections")) } }
         return FlowItem(viewIdentity: "flow:\(id)", flowID: id, label: row["Label"] ?? "", type: row["Type"] ?? "", stage: stage, priority: row["Priority"] ?? "", location: location, summary: row["Summary"] ?? "", bundleContent: bundle)
     } }
     private func assembleInbox(flow: [FlowItem], configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [FlowItem] {
@@ -189,13 +283,74 @@ struct ProductionsLoader {
         return !remainder.isEmpty && !remainder.contains("/")
     }
     private func parseCanvas(_ rows: [[String: String]], work: [String: WorkItem], issues: inout [ProductionsIssue]) -> [CanvasEvent] { rows.enumerated().compactMap { index, row in let id = row["Work ID"] ?? ""; let event = row["Event"] ?? ""; guard work[id] != nil, ["Placed", "Engaged", "Cleared"].contains(event), let occurred = dateFormatter.date(from: row["Occurred"] ?? "") else { issues.append(.malformed("Canvas row \(index + 1)")); return nil }; return CanvasEvent(occurred: occurred, workID: id, event: event, reason: row["Reason"] ?? "", context: row["Context"] ?? "", sequence: index) } }
-    private func parseCrumbs(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Crumb] { rows.compactMap { row in let id = row["Crumb ID"] ?? "", target = row["Target"] ?? "", location = MarkdownTable.resolvedPath(row["Location"] ?? "", relativeTo: "Office/Threads"); guard identifier(id, prefix: "CRMB"), targets.contains(target), ["Idea", "Decision", "Action"].contains(row["Kind"] ?? ""), reader.exists(at: configuration.url(location)) else { issues.append(.malformed("Crumb \(id)")); return nil }; return Crumb(id: id, kind: row["Kind"]!, target: target, priority: row["Priority"] ?? "", summary: row["Summary"] ?? "", location: location) } }
-    private func parseMementos(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Memento] { var seen = Set<String>(); return rows.compactMap { row in
-        let id = row["Memento ID"] ?? "", target = row["Target"] ?? ""
-        guard identifier(id, prefix: "MEM"), targets.contains(target), let location = resolveMementoLocation(row["Location"] ?? "", configuration: configuration) else { issues.append(.malformed("Memento \(id)")); return nil }
-        guard seen.insert(target).inserted else { issues.append(.duplicate("current Memento target \(target)")); return nil }
-        return Memento(id: id, target: target, summary: row["Summary"] ?? "", resumePoint: row["Resume point"] ?? "", location: location)
-    } }
+    private func parseCrumbs(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Crumb] {
+        var seen = Set<String>()
+        return rows.compactMap { row in
+            let id = row["Crumb ID"] ?? "", target = row["Target"] ?? "", location = MarkdownTable.resolvedPath(row["Location"] ?? "", relativeTo: "Office/Threads")
+            guard seen.insert(id).inserted else { issues.append(.duplicate("Crumb ID \(id)")); return nil }
+            guard identifier(id, prefix: "CRMB"), targets.contains(target), ["Idea", "Decision", "Action"].contains(row["Kind"] ?? ""), reader.exists(at: configuration.url(location)), (try? reader.isSymbolicLink(at: configuration.url(location))) == false else { issues.append(.malformed("Crumb \(id)")); return nil }
+            return Crumb(id: id, kind: row["Kind"]!, target: target, priority: row["Priority"] ?? "", summary: row["Summary"] ?? "", location: location)
+        }
+    }
+    private struct MementoTarget {
+        let path: String
+        let record: WorkspaceRecord
+    }
+
+    private func parseMementos(_ rows: [[String: String]], work: [String: WorkItem], processing: [FlowItem], crumbs: [Crumb], configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Memento] {
+        var targets: [String: MementoTarget] = [:]
+        for item in work {
+            if let record = item.value.workspace { targets[item.key] = MementoTarget(path: item.value.workspacePath, record: record) }
+        }
+        for bundle in processing {
+            guard let id = bundle.flowID, let content = bundle.bundleContent else { continue }
+            do { targets[id] = MementoTarget(path: "\(bundle.location)/\(id).md", record: try WorkspaceMarkdown.parse(content)) }
+            catch { issues.append(.malformed("\(id) bundle Memento state: \(error.localizedDescription)")) }
+        }
+
+        var seenTargets = Set<String>()
+        var seenIDs = Set<String>()
+        var matchedTargets = Set<String>()
+        let crumbsByID = Dictionary(uniqueKeysWithValues: crumbs.map { ($0.id, $0) })
+        let parsed: [Memento] = rows.compactMap { row in
+            let id = row["Memento ID"] ?? "", targetID = row["Target"] ?? ""
+            guard identifier(id, prefix: "MEM"), let target = targets[targetID] else { issues.append(.malformed("Memento \(id)")); return nil }
+            guard seenIDs.insert(id).inserted else { issues.append(.duplicate("Memento ID \(id)")); return nil }
+            guard seenTargets.insert(targetID).inserted else { issues.append(.duplicate("current Memento target \(targetID)")); return nil }
+            guard let location = resolveMementoLocation(row["Location"] ?? "", configuration: configuration) else { issues.append(.malformed("Memento \(id)")); return nil }
+            let locationPath = location.split(separator: "#", maxSplits: 1).first.map(String.init) ?? location
+            guard locationPath == target.path else { issues.append(.mismatch("Memento \(id) target location")); return nil }
+            guard let current = target.record.currentMemento else { issues.append(.mismatch("Memento \(id) has no target Current Memento section")); return nil }
+            let created = row["Created"] ?? "", resume = row["Resume point"] ?? ""
+            guard current.id == id, current.created == created, continuation(resume, agreesWith: current.naturalResumePoint) else { issues.append(.mismatch("Memento \(id) ledger and target")); return nil }
+            guard current.openCrumbs.allSatisfy({ crumbsByID[$0]?.target == targetID }) else { issues.append(.unresolved("Memento \(id) Open Crumbs")); return nil }
+            let payload: (String, String)?
+            do { payload = try resolveExtendedPayload(current.extendedPayload, mementoID: id, targetPath: target.path, configuration: configuration) }
+            catch { issues.append(.unresolved("Memento \(id) extended payload: \(error.localizedDescription)")); return nil }
+            matchedTargets.insert(targetID)
+            return Memento(id: id, target: targetID, summary: row["Summary"] ?? "", resumePoint: resume, created: created, location: location, currentState: current.currentState, naturalResumePoint: current.naturalResumePoint, openCrumbs: current.openCrumbs, extendedPayloadPath: payload?.0, extendedPayloadContent: payload?.1)
+        }
+        for (targetID, target) in targets where target.record.currentMemento != nil && !matchedTargets.contains(targetID) {
+            issues.append(.mismatch("\(targetID) Current Memento has no matching live ledger row"))
+        }
+        return parsed
+    }
+
+    private func continuation(_ ledger: String, agreesWith substantive: String) -> Bool {
+        let lhs = ledger.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let rhs = substantive.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return !lhs.isEmpty && !rhs.isEmpty && (lhs == rhs || lhs.contains(rhs) || rhs.contains(lhs))
+    }
+
+    private func resolveExtendedPayload(_ value: String?, mementoID: String, targetPath: String, configuration: ProductionsConfiguration) throws -> (String, String)? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty, value != "—" else { return nil }
+        guard let reference = MarkdownTable.locationReference(value), reference.anchor == nil else { throw ProductionsConfigurationError.malformed("payload reference") }
+        let targetDirectory = configuration.url(targetPath).deletingLastPathComponent().standardizedFileURL
+        let payload = (reference.isRootRelative ? configuration.rootURL : targetDirectory).appending(path: reference.path).standardizedFileURL
+        guard payload.deletingLastPathComponent() == targetDirectory, payload.lastPathComponent == "\(mementoID).md", reader.exists(at: payload), reader.isReadable(at: payload), (try? reader.isDirectory(at: payload)) == false, (try? reader.isSymbolicLink(at: payload)) == false else { throw ProductionsConfigurationError.malformed("payload must be a readable root-level \(mementoID).md file") }
+        let relative = payload.pathComponents.dropFirst(configuration.rootURL.pathComponents.count).joined(separator: "/")
+        return (relative, String(decoding: try reader.readData(at: payload), as: UTF8.self))
+    }
     private func resolveMementoLocation(_ value: String, configuration: ProductionsConfiguration) -> String? {
         guard let reference = MarkdownTable.locationReference(value) else { return nil }
         let root = configuration.rootURL.standardizedFileURL
@@ -217,6 +372,17 @@ struct ProductionsLoader {
     private func identifier(_ value: String, prefix: String) -> Bool {
         let minimumWidth = ["FLOW", "BND", "CRMB", "MEM"].contains(prefix) ? 6 : 4
         return value.range(of: "^\(prefix)-[0-9]{\(minimumWidth),}$", options: .regularExpression) != nil
+    }
+
+    private func safeRootPath(_ path: String, configuration: ProductionsConfiguration) -> Bool {
+        let root = configuration.rootURL.standardizedFileURL, target = configuration.url(path).standardizedFileURL
+        guard target.path.hasPrefix(root.path + "/") else { return false }
+        var component = root
+        for name in target.pathComponents.dropFirst(root.pathComponents.count) {
+            component.append(path: name)
+            if (try? reader.isSymbolicLink(at: component)) != false { return false }
+        }
+        return true
     }
 }
 
@@ -277,4 +443,103 @@ enum MarkdownTable {
     }
     private static func rawPath(_ value: String) -> String { if let match = value.range(of: #"\]\(([^)]+)\)"#, options: .regularExpression) { return String(String(value[match]).dropFirst(2).dropLast()) }; return value }
     static func values(_ value: String) -> [String] { value == "—" ? [] : value.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) } }
+}
+
+enum WorkspaceMarkdown {
+    static func parse(_ markdown: String) throws -> WorkspaceRecord {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var ranges: [(name: String, start: Int, end: Int)] = []
+        var headings: [(name: String, index: Int)] = []
+        for (index, line) in lines.enumerated() {
+            guard line.hasPrefix("## "), !line.hasPrefix("### ") else { continue }
+            let name = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { continue }
+            headings.append((name, index))
+        }
+        for (offset, heading) in headings.enumerated() {
+            let end = offset + 1 < headings.count ? headings[offset + 1].index : lines.count
+            ranges.append((heading.name, heading.index + 1, end))
+        }
+        let grouped = Dictionary(grouping: ranges, by: \.name)
+        if let duplicate = grouped.first(where: { $0.value.count > 1 }) {
+            throw ProductionsConfigurationError.malformed("duplicate Workspace section \(duplicate.key)")
+        }
+        var sections: [String: String] = [:]
+        for range in ranges {
+            sections[range.name] = lines[range.start..<range.end].joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let core = sections["Core Record"] ?? ""
+        let fields = parseFields(core)
+        let current: CurrentMemento?
+        if let text = sections["Current Memento"] { current = try parseCurrentMemento(text) }
+        else { current = nil }
+        return WorkspaceRecord(fields: fields, sections: sections, currentMemento: current)
+    }
+
+    private static func parseFields(_ text: String) -> [String: String] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var result: [String: String] = [:]
+        var currentKey: String?
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") { continue }
+            if let colon = line.firstIndex(of: ":") {
+                let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
+                if key.range(of: #"^[A-Za-z][A-Za-z0-9 /()_-]*$"#, options: .regularExpression) != nil {
+                    currentKey = key
+                    result[key] = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                    continue
+                }
+            }
+            if let currentKey, !trimmed.isEmpty {
+                let existing = result[currentKey] ?? ""
+                result[currentKey] = existing.isEmpty ? trimmed : existing + "\n" + trimmed
+            }
+        }
+        return result
+    }
+
+    private static func parseCurrentMemento(_ text: String) throws -> CurrentMemento {
+        let required = ["Memento ID", "Created", "Current state", "Natural resume point", "Open Crumbs", "Extended payload"]
+        let fields = try parseNamedFields(text, names: required)
+        guard required.allSatisfy({ fields[$0] != nil }) else { throw ProductionsConfigurationError.malformed("partial Current Memento section") }
+        let id = fields["Memento ID"]!.trimmingCharacters(in: .whitespacesAndNewlines)
+        let created = fields["Created"]!.trimmingCharacters(in: .whitespacesAndNewlines)
+        let state = fields["Current state"]!.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resume = fields["Natural resume point"]!.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard id.range(of: #"^MEM-[0-9]{6,}$"#, options: .regularExpression) != nil,
+              created.range(of: #"^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T.+)?$"#, options: .regularExpression) != nil,
+              !state.isEmpty, !resume.isEmpty else {
+            throw ProductionsConfigurationError.malformed("malformed Current Memento fields")
+        }
+        let crumbs = MarkdownTable.values(fields["Open Crumbs"]!).flatMap { value in
+            value.split(whereSeparator: { $0 == "," || $0.isWhitespace }).map(String.init)
+        }
+        guard crumbs.allSatisfy({ $0.range(of: #"^CRMB-[0-9]{6,}$"#, options: .regularExpression) != nil }) else {
+            throw ProductionsConfigurationError.malformed("invalid Current Memento Open Crumbs")
+        }
+        let extended = fields["Extended payload"]!.trimmingCharacters(in: .whitespacesAndNewlines)
+        return CurrentMemento(id: id, created: created, currentState: state, naturalResumePoint: resume, openCrumbs: crumbs, extendedPayload: extended == "—" || extended.isEmpty ? nil : extended)
+    }
+
+    private static func parseNamedFields(_ text: String, names: [String]) throws -> [String: String] {
+        var result: [String: String] = [:], current: String?
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if let match = names.first(where: { line.hasPrefix("\($0):") }) {
+                guard result[match] == nil else { throw ProductionsConfigurationError.malformed("duplicate Current Memento field \(match)") }
+                current = match
+                result[match] = String(line.dropFirst(match.count + 1)).trimmingCharacters(in: .whitespaces)
+            } else if let current, !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                result[current, default: ""] += (result[current]!.isEmpty ? "" : "\n") + line.trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return result
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty || value == "—" ? nil : value
+    }
 }

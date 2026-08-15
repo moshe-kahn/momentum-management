@@ -18,12 +18,15 @@ final class ProductionsDashboardViewModel: ObservableObject {
     @Published var selectedID: String?
     @Published private(set) var intakeResults: [InboxIntakeResult] = []
     @Published private(set) var intakeDiagnostics = IntakeDiagnostics()
+    @Published private(set) var sessionPackage: SessionPackage?
     let captureMonitor: ProductionsAutomaticCaptureMonitor
     private let store: ProductionsConfigurationStore
     private let reader: any ProductionsReading
     private let opener: any SourceOpening
     private let registrationService: FlowRegistrationService
     private let canvasWorkService: CanvasWorkTransactionService
+    private let sessionService: SessionPreparationService
+    private let mementoService: MementoTransactionService
     private let automaticIntake: InboxAutomaticIntake
     private let scheduler: any InboxIntakeScheduling
     private let now: () -> Date
@@ -32,9 +35,10 @@ final class ProductionsDashboardViewModel: ObservableObject {
     private var isExecutingScheduledObservation = false
     private let instanceID = UUID().uuidString
 
-    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), canvasWorkService: CanvasWorkTransactionService = CanvasWorkTransactionService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
+    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), canvasWorkService: CanvasWorkTransactionService = CanvasWorkTransactionService(), sessionService: SessionPreparationService = SessionPreparationService(), mementoService: MementoTransactionService = MementoTransactionService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
         self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService
         self.canvasWorkService = canvasWorkService
+        self.sessionService = sessionService; self.mementoService = mementoService
         self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
         self.scheduler = intakeScheduler; self.now = now; self.captureMonitor = ProductionsAutomaticCaptureMonitor()
         IntakeLifecycleLog.event(instanceID, "ViewModel created")
@@ -82,11 +86,54 @@ final class ProductionsDashboardViewModel: ObservableObject {
     func performCanvasAction(_ action: CanvasWorkAction, work: WorkItem, reason: String, context: String) {
         guard let configuration = state?.configuration else { message = "Choose a valid Productions root before changing Canvas."; return }
         do {
-            let result = try canvasWorkService.perform(action: action, configuration: configuration, work: work, reason: reason, context: context) {
-                ProductionsLoader(reader: self.reader).load(configuration: $0)
+            if action == .start {
+                let outcome = try SessionPreparationCoordinator(canvas: canvasWorkService, renderer: sessionService.renderer, reader: reader).startWorkAndPrepare(configuration: configuration, work: work, reason: reason, context: context, authorization: .readOnly, recommendedModel: "Codex", reasoningLevel: "high")
+                readOnlyLoad(configuration)
+                switch outcome {
+                case let .prepared(result, package):
+                    sessionPackage = package
+                    message = "Start work recorded for \(work.title) (\(work.id)): \(result.appendedEvents.joined(separator: ", ")). Session package prepared."
+                case let .canvasCommittedPackageFailed(diagnostic):
+                    message = diagnostic
+                }
+            } else {
+                let result = try canvasWorkService.perform(action: action, configuration: configuration, work: work, reason: reason, context: context) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+                readOnlyLoad(configuration)
+                message = "\(result.action.title) recorded for \(work.title) (\(work.id)): \(result.appendedEvents.joined(separator: ", "))."
             }
-            readOnlyLoad(configuration)
-            message = "\(result.action.title) recorded for \(work.title) (\(work.id)): \(result.appendedEvents.joined(separator: ", "))."
+        } catch { message = error.localizedDescription }
+    }
+    func prepareSession(work: WorkItem, authorization: SessionAuthorizationMode = .readOnly, model: String = "Codex", reasoning: String = "high") {
+        prepareSession(targetID: work.id, authorization: authorization, model: model, reasoning: reasoning)
+    }
+    func prepareSession(targetID: String, authorization: SessionAuthorizationMode = .readOnly, model: String = "Codex", reasoning: String = "high") {
+        guard let state else { message = "Choose a valid Productions root before preparing a session."; return }
+        do { sessionPackage = try sessionService.renderer.prepare(state: state, workID: targetID, authorization: authorization, recommendedModel: model, reasoningLevel: reasoning); message = "Session package prepared without changing Productions." }
+        catch { sessionPackage = nil; message = error.localizedDescription }
+    }
+    func copyPreparedSession() {
+        guard let package = sessionPackage, let configuration = state?.configuration else { message = "Prepare a session package before Copy."; return }
+        do { try sessionService.copy(package, configuration: configuration); message = "The displayed session package was copied; Productions was unchanged." }
+        catch { sessionPackage = nil; message = error.localizedDescription }
+    }
+    func mutateMemento(action: MementoTransactionAction, work: WorkItem, draft: MementoDraft? = nil) {
+        mutateMemento(action: action, targetID: work.id, displayName: work.title, draft: draft)
+    }
+    func mutateMemento(action: MementoTransactionAction, targetID: String, displayName: String, draft: MementoDraft? = nil) {
+        guard let configuration = state?.configuration else { message = "Choose a valid Productions root before changing a Memento."; return }
+        let reload = { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+        do {
+            let result: MementoTransactionResult
+            switch action {
+            case .create, .supersede:
+                guard let draft else { message = "A complete Memento draft is required."; return }
+                result = action == .create
+                    ? try mementoService.create(configuration: configuration, targetID: targetID, draft: draft, reload: reload)
+                    : try mementoService.supersede(configuration: configuration, targetID: targetID, draft: draft, reload: reload)
+            case .resolve: result = try mementoService.resolve(configuration: configuration, targetID: targetID, reload: reload)
+            }
+            readOnlyLoad(configuration); sessionPackage = nil
+            message = "\(result.action.rawValue.capitalized) Memento \(result.mementoID) for \(displayName) (\(targetID)). Open Crumbs were not automatically resolved."
         } catch { message = error.localizedDescription }
     }
     func open(_ relativePath: String, directory: Bool = false) { guard let state else { return }; let url = state.configuration.url(relativePath, directory: directory); guard reader.exists(at: url), reader.isReadable(at: url) else { message = "Source is unavailable: \(relativePath)"; return }; do { try opener.open(url) } catch { message = error.localizedDescription } }
@@ -159,7 +206,7 @@ struct ProductionsDashboardView: View {
             case "Canvas": CanvasList(state: state, select: { model.selectedID = $0 })
             case "Work": WorkList(items: state.work, canvas: state.canvasCurrentIDs, select: { model.selectedID = $0 })
             case "Threads": ThreadsList(crumbs: state.crumbs, mementos: state.mementos, select: { model.selectedID = $0 })
-            default: DetailView(state: state, selectedID: model.selectedID, open: model.open, retry: model.retryRegistration, problem: model.retryProblem, canvasAction: model.performCanvasAction)
+            default: DetailView(state: state, selectedID: model.selectedID, sessionPackage: model.sessionPackage, open: model.open, retry: model.retryRegistration, problem: model.retryProblem, canvasAction: model.performCanvasAction, prepare: model.prepareSession, bundlePrepare: model.prepareSession, copy: model.copyPreparedSession, mementoAction: model.mutateMemento, bundleMementoAction: model.mutateMemento)
             }
         }
     }
@@ -247,26 +294,33 @@ private struct ThreadsList: View {
 private struct DetailView: View {
     let state: ProductionsState
     let selectedID: String?
+    let sessionPackage: SessionPackage?
     let open: (String, Bool) -> Void
     let retry: (FlowItem) -> Void
     let problem: (FlowItem) -> String?
     let canvasAction: (CanvasWorkAction, WorkItem, String, String) -> Void
+    let prepare: (WorkItem, SessionAuthorizationMode, String, String) -> Void
+    let bundlePrepare: (String, SessionAuthorizationMode, String, String) -> Void
+    let copy: () -> Void
+    let mementoAction: (MementoTransactionAction, WorkItem, MementoDraft?) -> Void
+    let bundleMementoAction: (MementoTransactionAction, String, String, MementoDraft?) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if let work = state.work.first(where: { $0.id == selectedID }) {
-                    WorkDetailView(work: work, isOnCanvas: state.canvasCurrentIDs.contains(work.id), open: open, perform: canvasAction)
+                    WorkDetailView(work: work, isOnCanvas: state.canvasCurrentIDs.contains(work.id), currentMemento: state.mementos.first(where: { $0.target == work.id }), sessionPackage: sessionPackage?.brief.workID == work.id ? sessionPackage : nil, open: open, perform: canvasAction, prepare: prepare, copy: copy, mementoAction: mementoAction)
                 } else if let flow = (state.inbox + state.processing).first(where: { $0.id == selectedID }) {
-                    Text("\(flow.flowID ?? "Unregistered") · \(flow.label)").font(.title3)
-                    Text(flow.summary)
-                    Text(flow.bundleContent ?? "Inbox payload: \(flow.location)").font(.caption).textSelection(.enabled)
-                    HStack {
-                        Button("Open") { open(flow.location, flow.stage == "Processing") }
-                        Button("Open Containing Folder") { open(flow.stage == "Inbox" ? "Office/Inbox" : "Office/Processing", true) }
-                        if flow.isUnregistered, let reason = problem(flow) {
-                            Text(reason).font(.caption).foregroundStyle(.orange)
-                            Button("Retry registration") { retry(flow) }
+                    if flow.stage == "Processing", let id = flow.flowID {
+                        BundleDetailView(bundle: flow, currentMemento: state.mementos.first(where: { $0.target == id }), sessionPackage: sessionPackage?.brief.workID == id ? sessionPackage : nil, open: open, prepare: bundlePrepare, copy: copy, mementoAction: bundleMementoAction)
+                    } else {
+                        Text("\(flow.flowID ?? "Unregistered") · \(flow.label)").font(.title3)
+                        Text(flow.summary)
+                        Text("Inbox payload: \(flow.location)").font(.caption).textSelection(.enabled)
+                        HStack {
+                            Button("Open") { open(flow.location, false) }
+                            Button("Open Containing Folder") { open("Office/Inbox", true) }
+                            if flow.isUnregistered, let reason = problem(flow) { Text(reason).font(.caption).foregroundStyle(.orange); Button("Retry registration") { retry(flow) } }
                         }
                     }
                 } else { ContentUnavailableView("Select an item", systemImage: "doc.text") }
@@ -282,9 +336,17 @@ private struct DetailView: View {
 private struct WorkDetailView: View {
     let work: WorkItem
     let isOnCanvas: Bool
+    let currentMemento: Memento?
+    let sessionPackage: SessionPackage?
     let open: (String, Bool) -> Void
     let perform: (CanvasWorkAction, WorkItem, String, String) -> Void
+    let prepare: (WorkItem, SessionAuthorizationMode, String, String) -> Void
+    let copy: () -> Void
+    let mementoAction: (MementoTransactionAction, WorkItem, MementoDraft?) -> Void
     @State private var pendingAction: CanvasWorkAction?
+    @State private var showingPrepare = false
+    @State private var showingMemento = false
+    @State private var confirmingResolution = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -299,6 +361,21 @@ private struct WorkDetailView: View {
                     .disabled(work.lifecycle.hasPrefix("Done"))
                 Button("Stop work") { pendingAction = .stop }
                     .disabled(!isOnCanvas)
+                Divider().frame(height: 18)
+                Button("Prepare session") { showingPrepare = true }
+                Button(currentMemento == nil ? "Leave Memento" : "Supersede Memento") { showingMemento = true }
+                if currentMemento != nil { Button("Resolve Memento", role: .destructive) { confirmingResolution = true } }
+            }
+            if let package = sessionPackage {
+                GroupBox("Prepared Session Preview") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(package.displayedText).font(.caption.monospaced()).textSelection(.enabled)
+                        HStack {
+                            Button("Regenerate") { prepare(work, package.brief.authorizationMode, package.brief.recommendedModel, package.brief.reasoningLevel) }
+                            Button("Copy displayed package") { copy() }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .sheet(item: $pendingAction) { action in
@@ -309,6 +386,127 @@ private struct WorkDetailView: View {
                 pendingAction = nil
             }
         }
+        .sheet(isPresented: $showingPrepare) {
+            PrepareSessionSheet(title: work.title, workID: work.id) { authorization, model, reasoning in
+                prepare(work, authorization, model, reasoning); showingPrepare = false
+            } cancel: { showingPrepare = false }
+        }
+        .sheet(isPresented: $showingMemento) {
+            MementoActionSheet(title: work.title, targetID: work.id, action: currentMemento == nil ? .create : .supersede) { draft in
+                mementoAction(currentMemento == nil ? .create : .supersede, work, draft); showingMemento = false
+            } cancel: { showingMemento = false }
+        }
+        .confirmationDialog("Resolve \(currentMemento?.summary ?? "current Memento")?", isPresented: $confirmingResolution) {
+            Button("Resolve and retain payload", role: .destructive) { mementoAction(.resolve, work, nil) }
+        } message: { Text("The live row and Current Memento section will be removed. Any extended payload and all Open Crumbs remain unchanged.") }
+    }
+}
+
+private struct BundleDetailView: View {
+    let bundle: FlowItem
+    let currentMemento: Memento?
+    let sessionPackage: SessionPackage?
+    let open: (String, Bool) -> Void
+    let prepare: (String, SessionAuthorizationMode, String, String) -> Void
+    let copy: () -> Void
+    let mementoAction: (MementoTransactionAction, String, String, MementoDraft?) -> Void
+    @State private var showingPrepare = false
+    @State private var showingMemento = false
+    @State private var confirmingResolution = false
+
+    var body: some View {
+        let id = bundle.flowID ?? ""
+        VStack(alignment: .leading, spacing: 10) {
+            Text("\(id) · \(bundle.label)").font(.title3)
+            Text("Processing bundle · \(bundle.priority)")
+            Text(bundle.bundleContent ?? "Record unavailable").font(.caption).textSelection(.enabled)
+            HStack {
+                Button("Open") { open(bundle.location, true) }
+                Button("Open Containing Folder") { open("Office/Processing", true) }
+                Divider().frame(height: 18)
+                Button("Prepare session") { showingPrepare = true }.disabled(currentMemento == nil)
+                Button(currentMemento == nil ? "Leave Memento" : "Supersede Memento") { showingMemento = true }
+                if currentMemento != nil { Button("Resolve Memento", role: .destructive) { confirmingResolution = true } }
+            }
+            Text("Processing bundles can prepare only a validated Memento-backed resume package and never receive Canvas Start work.").font(.caption).foregroundStyle(.secondary)
+            if let package = sessionPackage {
+                GroupBox("Prepared Session Preview") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(package.displayedText).font(.caption.monospaced()).textSelection(.enabled)
+                        HStack {
+                            Button("Regenerate") { prepare(id, package.brief.authorizationMode, package.brief.recommendedModel, package.brief.reasoningLevel) }
+                            Button("Copy displayed package") { copy() }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .sheet(isPresented: $showingPrepare) {
+            PrepareSessionSheet(title: bundle.label, workID: id) { authorization, model, reasoning in
+                prepare(id, authorization, model, reasoning); showingPrepare = false
+            } cancel: { showingPrepare = false }
+        }
+        .sheet(isPresented: $showingMemento) {
+            MementoActionSheet(title: bundle.label, targetID: id, action: currentMemento == nil ? .create : .supersede) { draft in
+                mementoAction(currentMemento == nil ? .create : .supersede, id, bundle.label, draft); showingMemento = false
+            } cancel: { showingMemento = false }
+        }
+        .confirmationDialog("Resolve \(currentMemento?.summary ?? "current Memento")?", isPresented: $confirmingResolution) {
+            Button("Resolve and retain payload", role: .destructive) { mementoAction(.resolve, id, bundle.label, nil) }
+        } message: { Text("The live row and Current Memento section will be removed. Any extended payload and all Open Crumbs remain unchanged.") }
+    }
+}
+
+private struct PrepareSessionSheet: View {
+    let title: String
+    let workID: String
+    let confirm: (SessionAuthorizationMode, String, String) -> Void
+    let cancel: () -> Void
+    @State private var authorization: SessionAuthorizationMode = .readOnly
+    @State private var model = "Codex"
+    @State private var reasoning = "high"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Prepare session").font(.title3)
+            Text("\(title) (\(workID))").font(.headline)
+            Text("Preview, regeneration, and Copy are passive. Authorization and model inputs are ephemeral and cannot broaden canonical boundaries.").foregroundStyle(.secondary)
+            Picker("Authorization", selection: $authorization) { ForEach(SessionAuthorizationMode.allCases) { Text($0.rawValue).tag($0) } }
+            TextField("Recommended model", text: $model)
+            TextField("Reasoning level", text: $reasoning)
+            HStack { Spacer(); Button("Cancel", role: .cancel) { cancel() }; Button("Prepare") { confirm(authorization, model, reasoning) }.disabled(model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+        }.padding().frame(minWidth: 540)
+    }
+}
+
+private struct MementoActionSheet: View {
+    let title: String
+    let targetID: String
+    let action: MementoTransactionAction
+    let confirm: (MementoDraft) -> Void
+    let cancel: () -> Void
+    @State private var summary = ""
+    @State private var currentState = ""
+    @State private var resumePoint = ""
+    @State private var openCrumbs = ""
+    @State private var extendedPayload = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(action == .create ? "Leave Memento" : "Supersede Memento").font(.title3)
+            Text("\(title) (\(targetID))").font(.headline)
+            Text("This is an explicit recoverable Productions transaction. Open Crumbs are referenced only and will not be resolved.").foregroundStyle(.secondary)
+            TextField("Memento name", text: $summary)
+            TextEditor(text: $currentState).frame(height: 90).overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+            TextField("Natural resume point", text: $resumePoint)
+            TextField("Open Crumb IDs (semicolon-separated)", text: $openCrumbs)
+            TextEditor(text: $extendedPayload).frame(height: 70).overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+            HStack {
+                Spacer(); Button("Cancel", role: .cancel) { cancel() }
+                Button(action == .create ? "Create Memento" : "Supersede Memento") {
+                    let crumbs = openCrumbs.split(separator: ";").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+                    confirm(MementoDraft(summary: summary, currentState: currentState, naturalResumePoint: resumePoint, openCrumbs: crumbs, extendedPayload: extendedPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : extendedPayload))
+                }.disabled(summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || currentState.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || resumePoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding().frame(minWidth: 580)
     }
 }
 

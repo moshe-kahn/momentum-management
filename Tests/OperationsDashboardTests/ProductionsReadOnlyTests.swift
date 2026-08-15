@@ -39,7 +39,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
     func testRootRelativeCodeMementoLocationResolvesCurrentMementoAnchor() throws {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
-        try fixture.add("# TASK-000001\n\n## Current Memento\n\nMemento ID: MEM-000001", at: "Workspace/TASK-000001/TASK-000001.md")
+        try fixture.add(fixture.workspaceRecord, at: "Workspace/TASK-000001/TASK-000001.md")
         fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md#current-memento`"))
 
         let state = fixture.load()
@@ -51,7 +51,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
     func testExistingMementoFileWithMismatchedAnchorIsRejected() throws {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
-        try fixture.add("# TASK-000001\n\n## Current Memento", at: "Workspace/TASK-000001/TASK-000001.md")
+        try fixture.add(fixture.workspaceRecord, at: "Workspace/TASK-000001/TASK-000001.md")
         fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md#different-memento`"))
 
         let state = fixture.load()
@@ -63,7 +63,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
     func testMementoAnchorIsExcludedFromFilesystemExistenceCheck() throws {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
-        try fixture.add("# TASK-000001\n\n## Current Memento", at: "Workspace/TASK-000001/TASK-000001.md")
+        try fixture.add(fixture.workspaceRecord, at: "Workspace/TASK-000001/TASK-000001.md")
         fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md#current-memento`"))
         let reader = RecordingProductionsReader()
 
@@ -154,7 +154,7 @@ final class SyntheticProductionsFixture {
         root = manager.temporaryDirectory.appending(path: "ProductionsReadOnlyTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
         try write("payload", "Office/Inbox/FLOW-000001.md")
-        try write("# TASK-000001\n\nSynthetic record.", "Workspace/TASK-000001/TASK-000001.md")
+        try write(workspaceRecord, "Workspace/TASK-000001/TASK-000001.md")
         try write("## Bundle Record\nKey: value\n\n## Processing State\nOpen\n\n## Contents\n| Item | Disposition | Destination |\n| --- | --- | --- |\n| source | — | — |", "Office/Processing/BND-000001 - Bundle/BND-000001.md")
         try write(flow, "Office/Flow.md")
         try write(identifierLedger, "Warehouse/Reference/Identifier Ledger.md")
@@ -186,8 +186,9 @@ final class SyntheticProductionsFixture {
     func snapshot() throws -> [String: Data] { let files = try manager.subpathsOfDirectory(atPath: root.path).sorted(); return try Dictionary(uniqueKeysWithValues: files.map { path in let url = root.appending(path: path); return (path, (try? Data(contentsOf: url)) ?? Data()) }) }
     private func write(_ text: String, _ path: String) throws { let url = root.appending(path: path); try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true); try Data(text.utf8).write(to: url) }
     var flow: String { "| Entry ID | Label | Type | Stage | Priority | Steward | Department | Product | Source | Related work | Location | Summary | Next disposition | Created | Updated |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| FLOW-000001 | Inbox item | Note | Inbox | High | Office | Office | — | test | TASK-000001 | `Office/Inbox/FLOW-000001.md` | Incoming | Review | 2026-08-11 | 2026-08-11 |\n| BND-000001 | Bundle | Bundle | Processing | Medium | Office | Office | — | test | TASK-000001 | `Office/Processing/BND-000001 - Bundle/` | Processing | Review | 2026-08-11 | 2026-08-11 |" }
-    var identifierLedger: String { "| Identifier type | Prefix | Minimum digits | Last issued | Next display |\n| --- | --- | --- | --- | --- |\n| Inbox / routing entry | FLOW | 6 | 1 | `FLOW-000002` |" }
+    var identifierLedger: String { "| Identifier type | Prefix | Minimum digits | Last issued | Next display |\n| --- | --- | --- | --- | --- |\n| Inbox / routing entry | FLOW | 6 | 1 | `FLOW-000002` |\n| Memento | MEM | 6 | 1 | `MEM-000002` |" }
     func mementoLedger(location: String) -> String { "| Memento ID | Target | Summary | Resume point | Created | Location |\n| --- | --- | --- | --- | --- | --- |\n| MEM-000001 | TASK-000001 | Pause | Resume here | 2026-08-11 | \(location) |" }
+    var workspaceRecord: String { "# TASK-000001\n\n## Core Record\n\n```text\nTitle: Synthetic task\nID: TASK-000001\nType: Task\nAssociated product(s): —\nPrimary department: Office\nObjective or question: Complete the synthetic objective.\nNext step: Resume here\nCompletion or resolution criterion: Verify the synthetic outcome.\nLast validated state: Synthetic repository tests passed.\nRelevant locations: \(root.path)\n```\n\n## Steps\n\n- [ ] Complete synthetic validation.\n\n## Current Memento\n\nMemento ID: MEM-000001\nCreated: 2026-08-11\nCurrent state: Synthetic repository tests passed.\nNatural resume point: Resume here\nOpen Crumbs: CRMB-000001\nExtended payload: —" }
     private var taskRegistry: String { "| Task ID | Title | State | Priority | Current lead | Initiative | Project | Depends on | Short description | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| TASK-000001 | Synthetic task | Active / Current | High | Office | — | — | — | test | [task](../../Workspace/TASK-000001/TASK-000001.md) |" }
 }
 
