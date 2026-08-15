@@ -25,6 +25,85 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertTrue(state.issues.contains { if case .duplicate = $0 { true } else { false } })
     }
 
+    func testRootRelativeCodeMementoLocationResolvesWithoutAnchor() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md`"))
+
+        let state = fixture.load()
+
+        XCTAssertEqual(state.mementos.first?.location, "Workspace/TASK-000001/TASK-000001.md")
+        XCTAssertFalse(state.issues.contains { if case .malformed("Memento MEM-000001") = $0 { true } else { false } })
+    }
+
+    func testRootRelativeCodeMementoLocationResolvesCurrentMementoAnchor() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        try fixture.add("# TASK-000001\n\n## Current Memento\n\nMemento ID: MEM-000001", at: "Workspace/TASK-000001/TASK-000001.md")
+        fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md#current-memento`"))
+
+        let state = fixture.load()
+
+        XCTAssertEqual(state.mementos.first?.location, "Workspace/TASK-000001/TASK-000001.md#current-memento")
+        XCTAssertFalse(state.issues.contains { if case .malformed("Memento MEM-000001") = $0 { true } else { false } })
+    }
+
+    func testExistingMementoFileWithMismatchedAnchorIsRejected() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        try fixture.add("# TASK-000001\n\n## Current Memento", at: "Workspace/TASK-000001/TASK-000001.md")
+        fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md#different-memento`"))
+
+        let state = fixture.load()
+
+        XCTAssertTrue(state.mementos.isEmpty)
+        XCTAssertTrue(state.issues.contains(.malformed("Memento MEM-000001")))
+    }
+
+    func testMementoAnchorIsExcludedFromFilesystemExistenceCheck() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        try fixture.add("# TASK-000001\n\n## Current Memento", at: "Workspace/TASK-000001/TASK-000001.md")
+        fixture.replaceMementos(fixture.mementoLedger(location: "`Workspace/TASK-000001/TASK-000001.md#current-memento`"))
+        let reader = RecordingProductionsReader()
+
+        let state = ProductionsLoader(reader: reader).load(configuration: fixture.configuration)
+
+        XCTAssertEqual(state.mementos.map(\.id), ["MEM-000001"])
+        XCTAssertTrue(reader.existenceChecks.contains { $0.hasSuffix("Workspace/TASK-000001/TASK-000001.md") })
+        XCTAssertFalse(reader.existenceChecks.contains { $0.contains("#current-memento") })
+    }
+
+    func testRootRelativeMementoLocationCannotEscapeProductionsRoot() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let name = "escaped-memento-\(UUID().uuidString).md"
+        try fixture.addOutsideRoot("outside", named: name)
+        fixture.replaceMementos(fixture.mementoLedger(location: "`../\(name)`"))
+
+        let state = fixture.load()
+
+        XCTAssertTrue(state.mementos.isEmpty)
+        XCTAssertTrue(state.issues.contains(.malformed("Memento MEM-000001")))
+    }
+
+    func testMissingAndSymbolicLinkMementoTargetsRemainRejected() throws {
+        let missingFixture = try SyntheticProductionsFixture()
+        defer { missingFixture.remove() }
+        missingFixture.replaceMementos(missingFixture.mementoLedger(location: "`Workspace/TASK-000001/missing.md`"))
+        let missingState = missingFixture.load()
+        XCTAssertTrue(missingState.mementos.isEmpty)
+        XCTAssertTrue(missingState.issues.contains(.malformed("Memento MEM-000001")))
+
+        let symlinkFixture = try SyntheticProductionsFixture()
+        defer { symlinkFixture.remove() }
+        try symlinkFixture.addMementoSymlink(at: "Workspace/TASK-000001/memento-link.md")
+        symlinkFixture.replaceMementos(symlinkFixture.mementoLedger(location: "`Workspace/TASK-000001/memento-link.md`"))
+        let symlinkState = symlinkFixture.load()
+        XCTAssertTrue(symlinkState.mementos.isEmpty)
+        XCTAssertTrue(symlinkState.issues.contains(.malformed("Memento MEM-000001")))
+    }
+
     func testUnreferencedInboxFileAppearsAsOneUnregisteredItemWithoutWrites() throws {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
@@ -70,6 +149,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
 final class SyntheticProductionsFixture {
     let root: URL
     private let manager = FileManager.default
+    private var additionalURLs: [URL] = []
     init(duplicateMemento: Bool = false) throws {
         root = manager.temporaryDirectory.appending(path: "ProductionsReadOnlyTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
@@ -89,15 +169,34 @@ final class SyntheticProductionsFixture {
         let mementos = "| Memento ID | Target | Summary | Resume point | Created | Location |\n| --- | --- | --- | --- | --- | --- |\n| MEM-000001 | TASK-000001 | Pause | Resume here | 2026-08-11 | [task](../../Workspace/TASK-000001/TASK-000001.md) |" + (duplicateMemento ? "\n| MEM-000002 | TASK-000001 | Duplicate | Again | 2026-08-11 | [task](../../Workspace/TASK-000001/TASK-000001.md) |" : "")
         try write(mementos, "Office/Threads/Mementos.md")
     }
-    func remove() { try? manager.removeItem(at: root) }
-    func load() -> ProductionsState { ProductionsLoader(reader: LocalFileSystem()).load(configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: root.path)) }
+    func remove() { try? manager.removeItem(at: root); additionalURLs.forEach { try? manager.removeItem(at: $0) } }
+    var configuration: ProductionsConfiguration { ProductionsConfiguration(schemaVersion: 2, productionsRootPath: root.path) }
+    func load() -> ProductionsState { ProductionsLoader(reader: LocalFileSystem()).load(configuration: configuration) }
     func add(_ text: String, at path: String) throws { try write(text, path) }
+    func addOutsideRoot(_ text: String, named name: String) throws { let url = root.deletingLastPathComponent().appending(path: name); try Data(text.utf8).write(to: url); additionalURLs.append(url) }
+    func addMementoSymlink(at path: String) throws {
+        let url = root.appending(path: path)
+        try manager.createSymbolicLink(at: url, withDestinationURL: root.appending(path: "Workspace/TASK-000001/TASK-000001.md"))
+    }
     func replaceFlow(_ text: String) { try? write(text, "Office/Flow.md") }
     func replaceLedger(_ text: String) { try? write(text, "Warehouse/Reference/Identifier Ledger.md") }
+    func replaceMementos(_ text: String) { try? write(text, "Office/Threads/Mementos.md") }
     func data(at path: String) throws -> Data { try Data(contentsOf: root.appending(path: path)) }
     func snapshot() throws -> [String: Data] { let files = try manager.subpathsOfDirectory(atPath: root.path).sorted(); return try Dictionary(uniqueKeysWithValues: files.map { path in let url = root.appending(path: path); return (path, (try? Data(contentsOf: url)) ?? Data()) }) }
     private func write(_ text: String, _ path: String) throws { let url = root.appending(path: path); try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true); try Data(text.utf8).write(to: url) }
     var flow: String { "| Entry ID | Label | Type | Stage | Priority | Steward | Department | Product | Source | Related work | Location | Summary | Next disposition | Created | Updated |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| FLOW-000001 | Inbox item | Note | Inbox | High | Office | Office | — | test | TASK-000001 | `Office/Inbox/FLOW-000001.md` | Incoming | Review | 2026-08-11 | 2026-08-11 |\n| BND-000001 | Bundle | Bundle | Processing | Medium | Office | Office | — | test | TASK-000001 | `Office/Processing/BND-000001 - Bundle/` | Processing | Review | 2026-08-11 | 2026-08-11 |" }
     var identifierLedger: String { "| Identifier type | Prefix | Minimum digits | Last issued | Next display |\n| --- | --- | --- | --- | --- |\n| Inbox / routing entry | FLOW | 6 | 1 | `FLOW-000002` |" }
+    func mementoLedger(location: String) -> String { "| Memento ID | Target | Summary | Resume point | Created | Location |\n| --- | --- | --- | --- | --- | --- |\n| MEM-000001 | TASK-000001 | Pause | Resume here | 2026-08-11 | \(location) |" }
     private var taskRegistry: String { "| Task ID | Title | State | Priority | Current lead | Initiative | Project | Depends on | Short description | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| TASK-000001 | Synthetic task | Active / Current | High | Office | — | — | — | test | [task](../../Workspace/TASK-000001/TASK-000001.md) |" }
+}
+
+private final class RecordingProductionsReader: ProductionsReading {
+    private let local = LocalFileSystem()
+    private(set) var existenceChecks: [String] = []
+    func exists(at url: URL) -> Bool { existenceChecks.append(url.path); return local.exists(at: url) }
+    func isReadable(at url: URL) -> Bool { local.isReadable(at: url) }
+    func isSymbolicLink(at url: URL) throws -> Bool { try local.isSymbolicLink(at: url) }
+    func isDirectory(at url: URL) throws -> Bool { try local.isDirectory(at: url) }
+    func directoryEntries(at url: URL) throws -> [FileSystemEntry] { try local.directoryEntries(at: url) }
+    func readData(at url: URL) throws -> Data { try local.readData(at: url) }
 }

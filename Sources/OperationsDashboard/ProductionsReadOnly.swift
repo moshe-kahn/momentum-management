@@ -5,12 +5,17 @@ import Foundation
 protocol ProductionsReading {
     func exists(at url: URL) -> Bool
     func isReadable(at url: URL) -> Bool
+    func isSymbolicLink(at url: URL) throws -> Bool
     func isDirectory(at url: URL) throws -> Bool
     func directoryEntries(at url: URL) throws -> [FileSystemEntry]
     func readData(at url: URL) throws -> Data
 }
 
-extension LocalFileSystem: ProductionsReading {}
+extension LocalFileSystem: ProductionsReading {
+    func isSymbolicLink(at url: URL) throws -> Bool {
+        try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true
+    }
+}
 
 struct ProductionsConfiguration: Codable, Equatable, Sendable {
     static let schemaVersion = 2
@@ -185,7 +190,30 @@ struct ProductionsLoader {
     }
     private func parseCanvas(_ rows: [[String: String]], work: [String: WorkItem], issues: inout [ProductionsIssue]) -> [CanvasEvent] { rows.enumerated().compactMap { index, row in let id = row["Work ID"] ?? ""; let event = row["Event"] ?? ""; guard work[id] != nil, ["Placed", "Engaged", "Cleared"].contains(event), let occurred = dateFormatter.date(from: row["Occurred"] ?? "") else { issues.append(.malformed("Canvas row \(index + 1)")); return nil }; return CanvasEvent(occurred: occurred, workID: id, event: event, reason: row["Reason"] ?? "", context: row["Context"] ?? "", sequence: index) } }
     private func parseCrumbs(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Crumb] { rows.compactMap { row in let id = row["Crumb ID"] ?? "", target = row["Target"] ?? "", location = MarkdownTable.resolvedPath(row["Location"] ?? "", relativeTo: "Office/Threads"); guard identifier(id, prefix: "CRMB"), targets.contains(target), ["Idea", "Decision", "Action"].contains(row["Kind"] ?? ""), reader.exists(at: configuration.url(location)) else { issues.append(.malformed("Crumb \(id)")); return nil }; return Crumb(id: id, kind: row["Kind"]!, target: target, priority: row["Priority"] ?? "", summary: row["Summary"] ?? "", location: location) } }
-    private func parseMementos(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Memento] { var seen = Set<String>(); return rows.compactMap { row in let id = row["Memento ID"] ?? "", target = row["Target"] ?? "", location = MarkdownTable.resolvedPath(row["Location"] ?? "", relativeTo: "Office/Threads"); guard identifier(id, prefix: "MEM"), targets.contains(target), reader.exists(at: configuration.url(location)) else { issues.append(.malformed("Memento \(id)")); return nil }; guard seen.insert(target).inserted else { issues.append(.duplicate("current Memento target \(target)")); return nil }; return Memento(id: id, target: target, summary: row["Summary"] ?? "", resumePoint: row["Resume point"] ?? "", location: location) } }
+    private func parseMementos(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Memento] { var seen = Set<String>(); return rows.compactMap { row in
+        let id = row["Memento ID"] ?? "", target = row["Target"] ?? ""
+        guard identifier(id, prefix: "MEM"), targets.contains(target), let location = resolveMementoLocation(row["Location"] ?? "", configuration: configuration) else { issues.append(.malformed("Memento \(id)")); return nil }
+        guard seen.insert(target).inserted else { issues.append(.duplicate("current Memento target \(target)")); return nil }
+        return Memento(id: id, target: target, summary: row["Summary"] ?? "", resumePoint: row["Resume point"] ?? "", location: location)
+    } }
+    private func resolveMementoLocation(_ value: String, configuration: ProductionsConfiguration) -> String? {
+        guard let reference = MarkdownTable.locationReference(value) else { return nil }
+        let root = configuration.rootURL.standardizedFileURL
+        let base = reference.isRootRelative ? root : root.appending(path: "Office/Threads", directoryHint: .isDirectory)
+        let target = base.appending(path: reference.path, directoryHint: .notDirectory).standardizedFileURL
+        guard target.path != root.path, target.path.hasPrefix(root.path + "/"), target.pathExtension.lowercased() == "md", reader.exists(at: target), reader.isReadable(at: target), (try? reader.isDirectory(at: target)) == false else { return nil }
+        let relativeComponents = target.pathComponents.dropFirst(root.pathComponents.count)
+        var componentURL = root
+        for component in relativeComponents {
+            componentURL.append(path: component)
+            guard (try? reader.isSymbolicLink(at: componentURL)) == false else { return nil }
+        }
+        if let anchor = reference.anchor {
+            guard let data = try? reader.readData(at: target), MarkdownTable.contains(anchor: anchor, in: String(decoding: data, as: UTF8.self)) else { return nil }
+        }
+        let relativePath = relativeComponents.joined(separator: "/")
+        return relativePath + (reference.anchor.map { "#\($0)" } ?? "")
+    }
     private func identifier(_ value: String, prefix: String) -> Bool {
         let minimumWidth = ["FLOW", "BND", "CRMB", "MEM"].contains(prefix) ? 6 : 4
         return value.range(of: "^\(prefix)-[0-9]{\(minimumWidth),}$", options: .regularExpression) != nil
@@ -193,10 +221,60 @@ struct ProductionsLoader {
 }
 
 enum MarkdownTable {
+    struct LocationReference {
+        let path: String
+        let anchor: String?
+        let isRootRelative: Bool
+    }
+
     static func parse(_ text: String, required: [String]) throws -> [[String: String]] { let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init); guard let headerIndex = lines.firstIndex(where: { line in let headers = cells(line); return line.hasPrefix("|") && line.hasSuffix("|") && required.allSatisfy(headers.contains) }) else { throw ProductionsConfigurationError.malformed("required table header not found") }; let headers = cells(lines[headerIndex]); guard headerIndex + 1 < lines.count, lines[headerIndex + 1].contains("---") else { throw ProductionsConfigurationError.malformed("table separator missing") }; return try lines.dropFirst(headerIndex + 2).prefix { $0.hasPrefix("|") }.map { line in let values = cells(line); guard values.count == headers.count else { throw ProductionsConfigurationError.malformed("malformed table row") }; return Dictionary(uniqueKeysWithValues: zip(headers, values)) } }
     static func cells(_ line: String) -> [String] { line.split(separator: "|", omittingEmptySubsequences: false).dropFirst().dropLast().map { $0.trimmingCharacters(in: .whitespaces) } }
     static func rootPath(_ value: String) -> String { rawPath(value).trimmingCharacters(in: CharacterSet(charactersIn: "` ")) }
     static func resolvedPath(_ value: String, relativeTo base: String) -> String { let url = URL(fileURLWithPath: "/\(base)", isDirectory: true).appending(path: rawPath(value).trimmingCharacters(in: CharacterSet(charactersIn: "` "))).standardizedFileURL; return url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+    static func locationReference(_ value: String) -> LocationReference? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasOpeningBacktick = trimmed.hasPrefix("`")
+        let hasClosingBacktick = trimmed.hasSuffix("`")
+        let isRootRelative = hasOpeningBacktick && hasClosingBacktick
+        guard hasOpeningBacktick == hasClosingBacktick else { return nil }
+        let raw: String
+        if isRootRelative {
+            guard trimmed.count > 2 else { return nil }
+            raw = String(trimmed.dropFirst().dropLast())
+            guard !raw.contains("`") else { return nil }
+        } else {
+            raw = rawPath(trimmed)
+        }
+        let parts = raw.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+        let path = String(parts[0]).trimmingCharacters(in: .whitespaces)
+        let anchor = parts.count == 2 ? String(parts[1]) : nil
+        guard !path.isEmpty, !path.hasPrefix("/"), !path.contains("\n"), !path.contains("\r"), anchor?.isEmpty != true, anchor?.contains("#") != true else { return nil }
+        return LocationReference(path: path, anchor: anchor, isRootRelative: isRootRelative)
+    }
+    static func contains(anchor: String, in markdown: String) -> Bool {
+        var occurrences: [String: Int] = [:]
+        for line in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            let markerCount = trimmed.prefix(while: { $0 == "#" }).count
+            guard (1...6).contains(markerCount) else { continue }
+            let titleStart = trimmed.index(trimmed.startIndex, offsetBy: markerCount)
+            guard titleStart < trimmed.endIndex, trimmed[titleStart] == " " || trimmed[titleStart] == "\t" else { continue }
+            var title = String(trimmed[titleStart...]).trimmingCharacters(in: .whitespaces)
+            if let closing = title.range(of: #"\s+#+\s*$"#, options: .regularExpression) { title.removeSubrange(closing) }
+            let base = markdownAnchor(for: title)
+            guard !base.isEmpty else { continue }
+            let count = occurrences[base, default: 0]
+            occurrences[base] = count + 1
+            if anchor == (count == 0 ? base : "\(base)-\(count)") { return true }
+        }
+        return false
+    }
+    private static func markdownAnchor(for heading: String) -> String {
+        let lowered = heading.lowercased()
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_ "))
+        let scalars = lowered.unicodeScalars.filter(allowed.contains)
+        return String(String.UnicodeScalarView(scalars)).replacingOccurrences(of: " ", with: "-")
+    }
     private static func rawPath(_ value: String) -> String { if let match = value.range(of: #"\]\(([^)]+)\)"#, options: .regularExpression) { return String(String(value[match]).dropFirst(2).dropLast()) }; return value }
     static func values(_ value: String) -> [String] { value == "—" ? [] : value.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) } }
 }
