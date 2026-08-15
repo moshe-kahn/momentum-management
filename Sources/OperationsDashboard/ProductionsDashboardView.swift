@@ -23,6 +23,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
     private let reader: any ProductionsReading
     private let opener: any SourceOpening
     private let registrationService: FlowRegistrationService
+    private let canvasWorkService: CanvasWorkTransactionService
     private let automaticIntake: InboxAutomaticIntake
     private let scheduler: any InboxIntakeScheduling
     private let now: () -> Date
@@ -31,8 +32,9 @@ final class ProductionsDashboardViewModel: ObservableObject {
     private var isExecutingScheduledObservation = false
     private let instanceID = UUID().uuidString
 
-    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
+    init(store: ProductionsConfigurationStore = ProductionsConfigurationStore(), reader: any ProductionsReading = LocalFileSystem(), opener: any SourceOpening = WorkspaceSourceOpener(), registrationService: FlowRegistrationService = FlowRegistrationService(), canvasWorkService: CanvasWorkTransactionService = CanvasWorkTransactionService(), automaticIntake: InboxAutomaticIntake? = nil, intakeScheduler: any InboxIntakeScheduling = DispatchInboxIntakeScheduler(), now: @escaping () -> Date = Date.init, initialConfiguration: ProductionsConfiguration? = nil) {
         self.store = store; self.reader = reader; self.opener = opener; self.registrationService = registrationService
+        self.canvasWorkService = canvasWorkService
         self.automaticIntake = automaticIntake ?? InboxAutomaticIntake(registration: registrationService)
         self.scheduler = intakeScheduler; self.now = now; self.captureMonitor = ProductionsAutomaticCaptureMonitor()
         IntakeLifecycleLog.event(instanceID, "ViewModel created")
@@ -77,6 +79,16 @@ final class ProductionsDashboardViewModel: ObservableObject {
     func retryProblem(for payload: FlowItem) -> String? { guard let result = intakeResults.first(where: { $0.payloadPath == payload.location }) else { return nil }; switch result.outcome { case .problem, .investigationRequired, .suspended: return result.reason; case .deferred, .registered: return nil } }
     func registrationPreview(payload: FlowItem, metadata: FlowRegistrationMetadata) throws -> FlowRegistrationPreview { guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }; return try registrationService.preview(configuration: configuration, payload: payload, metadata: metadata) }
     func register(payload: FlowItem, metadata: FlowRegistrationMetadata, preview: FlowRegistrationPreview) throws { guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }; try registrationService.commit(configuration: configuration, payload: payload, metadata: metadata, preview: preview) { ProductionsLoader(reader: self.reader).load(configuration: $0) }; readOnlyLoad(configuration) }
+    func performCanvasAction(_ action: CanvasWorkAction, work: WorkItem, reason: String, context: String) {
+        guard let configuration = state?.configuration else { message = "Choose a valid Productions root before changing Canvas."; return }
+        do {
+            let result = try canvasWorkService.perform(action: action, configuration: configuration, work: work, reason: reason, context: context) {
+                ProductionsLoader(reader: self.reader).load(configuration: $0)
+            }
+            readOnlyLoad(configuration)
+            message = "\(result.action.title) recorded for \(work.title) (\(work.id)): \(result.appendedEvents.joined(separator: ", "))."
+        } catch { message = error.localizedDescription }
+    }
     func open(_ relativePath: String, directory: Bool = false) { guard let state else { return }; let url = state.configuration.url(relativePath, directory: directory); guard reader.exists(at: url), reader.isReadable(at: url) else { message = "Source is unavailable: \(relativePath)"; return }; do { try opener.open(url) } catch { message = error.localizedDescription } }
     var blockingSettingsIssues: [ProductionsIssue] { settingsIssues.filter { if case .missing = $0 { return true }; if case .unreadable = $0 { return true }; return false } }
     var hasBlockingSettingsIssues: Bool { !blockingSettingsIssues.isEmpty }
@@ -147,7 +159,7 @@ struct ProductionsDashboardView: View {
             case "Canvas": CanvasList(state: state, select: { model.selectedID = $0 })
             case "Work": WorkList(items: state.work, canvas: state.canvasCurrentIDs, select: { model.selectedID = $0 })
             case "Threads": ThreadsList(crumbs: state.crumbs, mementos: state.mementos, select: { model.selectedID = $0 })
-            default: DetailView(state: state, selectedID: model.selectedID, open: model.open, retry: model.retryRegistration, problem: model.retryProblem)
+            default: DetailView(state: state, selectedID: model.selectedID, open: model.open, retry: model.retryRegistration, problem: model.retryProblem, canvasAction: model.performCanvasAction)
             }
         }
     }
@@ -167,7 +179,7 @@ private struct ProductionsSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Productions Settings").font(.title3)
-            Text("The saved root is only this app’s local v2 configuration. It does not write to Productions.")
+            Text("Choosing and saving the root changes only this app’s local configuration. Productions mutations use separately authorized transaction paths; Canvas writes require a visible action.")
                 .foregroundStyle(.secondary)
             Text(model.rootPath.isEmpty ? "No root selected" : model.rootPath)
                 .font(.caption)
@@ -238,15 +250,13 @@ private struct DetailView: View {
     let open: (String, Bool) -> Void
     let retry: (FlowItem) -> Void
     let problem: (FlowItem) -> String?
+    let canvasAction: (CanvasWorkAction, WorkItem, String, String) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if let work = state.work.first(where: { $0.id == selectedID }) {
-                    Text("\(work.id) · \(work.title)").font(.title3)
-                    Text("\(work.kind.rawValue) · \(work.lifecycle) · \(work.priority)")
-                    Text(work.content ?? "Record unavailable").font(.caption).textSelection(.enabled)
-                    HStack { Button("Open") { open(work.workspacePath, false) }; Button("Open Containing Folder") { open("Workspace/\(work.id)", true) } }
+                    WorkDetailView(work: work, isOnCanvas: state.canvasCurrentIDs.contains(work.id), open: open, perform: canvasAction)
                 } else if let flow = (state.inbox + state.processing).first(where: { $0.id == selectedID }) {
                     Text("\(flow.flowID ?? "Unregistered") · \(flow.label)").font(.title3)
                     Text(flow.summary)
@@ -266,5 +276,77 @@ private struct DetailView: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private struct WorkDetailView: View {
+    let work: WorkItem
+    let isOnCanvas: Bool
+    let open: (String, Bool) -> Void
+    let perform: (CanvasWorkAction, WorkItem, String, String) -> Void
+    @State private var pendingAction: CanvasWorkAction?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("\(work.id) · \(work.title)").font(.title3)
+            Text("\(work.kind.rawValue) · \(work.lifecycle) · \(work.priority)\(isOnCanvas ? " · On Canvas" : "")")
+            Text(work.content ?? "Record unavailable").font(.caption).textSelection(.enabled)
+            HStack {
+                Button("Open") { open(work.workspacePath, false) }
+                Button("Open Containing Folder") { open("Workspace/\(work.id)", true) }
+                Divider().frame(height: 18)
+                Button("Start work") { pendingAction = .start }
+                    .disabled(work.lifecycle.hasPrefix("Done"))
+                Button("Stop work") { pendingAction = .stop }
+                    .disabled(!isOnCanvas)
+            }
+        }
+        .sheet(item: $pendingAction) { action in
+            CanvasWorkActionSheet(action: action, work: work) { reason, context in
+                perform(action, work, reason, context)
+                pendingAction = nil
+            } cancel: {
+                pendingAction = nil
+            }
+        }
+    }
+}
+
+private struct CanvasWorkActionSheet: View {
+    let action: CanvasWorkAction
+    let work: WorkItem
+    let confirm: (String, String) -> Void
+    let cancel: () -> Void
+    @State private var reason: String
+    @State private var context: String
+
+    init(action: CanvasWorkAction, work: WorkItem, confirm: @escaping (String, String) -> Void, cancel: @escaping () -> Void) {
+        self.action = action
+        self.work = work
+        self.confirm = confirm
+        self.cancel = cancel
+        _reason = State(initialValue: action == .start ? "Intentional work started." : "Deferral.")
+        _context = State(initialValue: action == .start ? "Work explicitly selected in Momentum Management." : "Work intentionally cleared from current attention.")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(action.title).font(.title3)
+            Text("\(work.title) (\(work.id))").font(.headline)
+            Text(action == .start
+                 ? "This records intentional work. If the item is not current, Placed and Engaged are appended; otherwise only Engaged is appended."
+                 : "This appends Cleared. It does not change lifecycle or priority.")
+                .foregroundStyle(.secondary)
+            TextField("Reason", text: $reason)
+            TextField("Context", text: $context)
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { cancel() }
+                Button(action.title) { confirm(reason, context) }
+                    .disabled(reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .frame(minWidth: 520)
     }
 }
