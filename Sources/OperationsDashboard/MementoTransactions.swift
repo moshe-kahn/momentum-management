@@ -24,6 +24,7 @@ struct MementoTransactionJournal: Codable, Equatable {
     let transactionID: UUID
     let timestamp: Date
     let action: MementoTransactionAction
+    let productionsRootPath: String?
     let targetID: String
     let mementoID: String
     let targetPath: String
@@ -70,13 +71,27 @@ protocol MementoTransactionLocking { func acquire(ledgerURL: URL) -> AnyObject? 
 private final class MementoWriteLock: NSObject {
     private let descriptor: Int32
     init?(url: URL) {
-        descriptor = open(url.path, O_RDWR)
+        descriptor = open(url.path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)
         guard descriptor >= 0, flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { if descriptor >= 0 { close(descriptor) }; return nil }
     }
     deinit { flock(descriptor, LOCK_UN); close(descriptor) }
 }
 struct LocalMementoTransactionLocking: MementoTransactionLocking {
-    func acquire(ledgerURL: URL) -> AnyObject? { MementoWriteLock(url: ledgerURL) }
+    let manager: FileManager
+    let directory: URL
+
+    init(manager: FileManager = .default, directory: URL? = nil) {
+        self.manager = manager
+        self.directory = directory ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appending(path: "Operations Dashboard/Memento Transaction Locks", directoryHint: .isDirectory)
+    }
+
+    func acquire(ledgerURL: URL) -> AnyObject? {
+        do { try manager.createDirectory(at: directory, withIntermediateDirectories: true) }
+        catch { return nil }
+        let key = SHA256.hash(data: Data(ledgerURL.standardizedFileURL.path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return MementoWriteLock(url: directory.appending(path: "\(key).lock"))
+    }
 }
 
 enum MementoTransactionError: LocalizedError, Equatable {
@@ -123,6 +138,7 @@ struct MementoTransactionService {
         let paths = Paths(configuration)
         guard let lock = locking.acquire(ledgerURL: paths.identifier) else { throw MementoTransactionError.lockUnavailable }
         defer { _ = lock }
+        try requireNoPendingRecovery(configuration)
         let state = reload(configuration)
         guard state.issues.isEmpty else { throw MementoTransactionError.conflict("Productions has contract issues; resolution is blocked.") }
         guard let existing = state.mementos.first(where: { $0.target == targetID }) else { throw MementoTransactionError.invalidTarget("The target has no validated current Memento to resolve.") }
@@ -132,7 +148,7 @@ struct MementoTransactionService {
         let nextTarget = try WorkspaceSectionEditing.removeCurrentMemento(from: String(decoding: target, as: UTF8.self))
         let nextLedger = try MementoLedgerEditing.removing(targetID: targetID, mementoID: existing.id, from: String(decoding: ledger, as: UTF8.self))
         let timestamp = now()
-        var journal = MementoTransactionJournal(transactionID: UUID(), timestamp: timestamp, action: .resolve, targetID: targetID, mementoID: existing.id, targetPath: targetPath, identifierHash: nil, mementoLedgerHash: hash(ledger), targetHash: hash(target), identifierPreimage: nil, mementoLedgerPreimage: ledger, targetPreimage: target, payloadPath: existing.extendedPayloadPath, payloadPreimage: existing.extendedPayloadPath.flatMap { try? Data(contentsOf: configuration.url($0)) }, terminalState: nil, diagnostic: nil)
+        var journal = MementoTransactionJournal(transactionID: UUID(), timestamp: timestamp, action: .resolve, productionsRootPath: configuration.rootURL.standardizedFileURL.path, targetID: targetID, mementoID: existing.id, targetPath: targetPath, identifierHash: nil, mementoLedgerHash: hash(ledger), targetHash: hash(target), identifierPreimage: nil, mementoLedgerPreimage: ledger, targetPreimage: target, payloadPath: existing.extendedPayloadPath, payloadPreimage: existing.extendedPayloadPath.flatMap { try? Data(contentsOf: configuration.url($0)) }, terminalState: nil, diagnostic: nil)
         do { try journalStore.persist(journal) } catch { throw MementoTransactionError.journalFailed("Could not persist Memento recovery journal: \(error.localizedDescription)") }
         guard hash(try Data(contentsOf: targetURL)) == journal.targetHash, hash(try Data(contentsOf: paths.mementos)) == journal.mementoLedgerHash else {
             journal.terminalState = .preCommitFailure; journal.diagnostic = "Target or Memento ledger changed after resolution was prepared."; try? journalStore.update(journal)
@@ -142,12 +158,12 @@ struct MementoTransactionService {
             try replacer.replace(data: Data(nextTarget.utf8), at: targetURL)
             try replacer.replace(data: Data(nextLedger.utf8), at: paths.mementos)
         } catch {
-            try recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, issuedIdentifier: false)
+            recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, issuedIdentifier: false)
             throw journal.terminalState == .recoveryRequired ? MementoTransactionError.recoveryRequired(journal.diagnostic!) : MementoTransactionError.replacementFailed(journal.diagnostic!)
         }
         let reloaded = reload(configuration)
         guard reloaded.issues.isEmpty, !reloaded.mementos.contains(where: { $0.target == targetID }) else {
-            try recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, issuedIdentifier: false)
+            recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, issuedIdentifier: false)
             throw MementoTransactionError.reloadFailed("Resolution did not validate; before-copies were restored when possible. \(journal.diagnostic ?? "")")
         }
         journal.terminalState = .committed; journal.diagnostic = "Extended payload handling: retained in place. Open Crumbs were not changed."; try? journalStore.update(journal)
@@ -160,6 +176,7 @@ struct MementoTransactionService {
         let paths = Paths(configuration)
         guard let lock = locking.acquire(ledgerURL: paths.identifier) else { throw MementoTransactionError.lockUnavailable }
         defer { _ = lock }
+        try requireNoPendingRecovery(configuration)
         let state = reload(configuration)
         guard state.issues.isEmpty else { throw MementoTransactionError.conflict("Productions has contract issues; Memento issuance is blocked.") }
         let existing = state.mementos.first(where: { $0.target == targetID })
@@ -181,7 +198,7 @@ struct MementoTransactionService {
         let row = try MementoLedgerEditing.row(id: newID, targetID: targetID, draft: draft, created: created, targetPath: targetPath)
         let nextLedger = try MementoLedgerEditing.setting(row: row, targetID: targetID, replacingID: existing?.id, in: String(decoding: ledger, as: UTF8.self))
         let nextIdentifier = try MementoIdentifierEditing.retiring(newID, in: String(decoding: identifier, as: UTF8.self))
-        var journal = MementoTransactionJournal(transactionID: UUID(), timestamp: timestamp, action: action, targetID: targetID, mementoID: newID, targetPath: targetPath, identifierHash: hash(identifier), mementoLedgerHash: hash(ledger), targetHash: hash(target), identifierPreimage: identifier, mementoLedgerPreimage: ledger, targetPreimage: target, payloadPath: payloadPath, payloadPreimage: nil, terminalState: nil, diagnostic: nil)
+        var journal = MementoTransactionJournal(transactionID: UUID(), timestamp: timestamp, action: action, productionsRootPath: configuration.rootURL.standardizedFileURL.path, targetID: targetID, mementoID: newID, targetPath: targetPath, identifierHash: hash(identifier), mementoLedgerHash: hash(ledger), targetHash: hash(target), identifierPreimage: identifier, mementoLedgerPreimage: ledger, targetPreimage: target, payloadPath: payloadPath, payloadPreimage: nil, terminalState: nil, diagnostic: nil)
         do { try journalStore.persist(journal) } catch { throw MementoTransactionError.journalFailed("Could not persist Memento recovery journal: \(error.localizedDescription)") }
         guard hash(try Data(contentsOf: paths.identifier)) == journal.identifierHash,
               hash(try Data(contentsOf: paths.mementos)) == journal.mementoLedgerHash,
@@ -195,23 +212,29 @@ struct MementoTransactionService {
             try replacer.replace(data: Data(nextTarget.utf8), at: targetURL)
             try replacer.replace(data: Data(nextLedger.utf8), at: paths.mementos)
         } catch {
-            try recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, issuedIdentifier: true, configuration: configuration)
+            recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, identifierURL: paths.identifier, issuedIdentifier: true, configuration: configuration)
             throw journal.terminalState == .recoveryRequired ? MementoTransactionError.recoveryRequired(journal.diagnostic!) : MementoTransactionError.replacementFailed(journal.diagnostic!)
         }
         let reloaded = reload(configuration)
         guard reloaded.issues.isEmpty, reloaded.mementos.contains(where: { $0.id == newID && $0.target == targetID }) else {
-            try recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, issuedIdentifier: true, configuration: configuration)
+            recover(journal: &journal, targetURL: targetURL, mementosURL: paths.mementos, identifierURL: paths.identifier, issuedIdentifier: true, configuration: configuration)
             throw MementoTransactionError.reloadFailed("Memento ID \(newID) was retired, but the transaction did not validate; before-copies were restored when possible. \(journal.diagnostic ?? "")")
         }
         journal.terminalState = .committed; journal.diagnostic = nil; try? journalStore.update(journal)
         return MementoTransactionResult(action: action, targetID: targetID, mementoID: newID, timestamp: timestamp)
     }
 
-    private func recover(journal: inout MementoTransactionJournal, targetURL: URL, mementosURL: URL, issuedIdentifier: Bool, configuration: ProductionsConfiguration? = nil) throws {
+    private func recover(journal: inout MementoTransactionJournal, targetURL: URL, mementosURL: URL, identifierURL: URL? = nil, issuedIdentifier: Bool, configuration: ProductionsConfiguration? = nil) {
         do {
             try replacer.replace(data: journal.targetPreimage, at: targetURL)
             try replacer.replace(data: journal.mementoLedgerPreimage, at: mementosURL)
             if let payloadPath = journal.payloadPath, journal.payloadPreimage == nil, let configuration, manager.fileExists(atPath: configuration.url(payloadPath).path) { try manager.removeItem(at: configuration.url(payloadPath)) }
+            if issuedIdentifier {
+                guard let identifierURL, let preimage = journal.identifierPreimage else {
+                    throw MementoTransactionError.recoveryRequired("Identifier recovery metadata is incomplete.")
+                }
+                try ensureRetired(journal.mementoID, preimage: preimage, identifierURL: identifierURL)
+            }
             journal.terminalState = issuedIdentifier ? .identifierRetiredRolledBack : .rolledBack
             journal.diagnostic = issuedIdentifier ? "Memento ID \(journal.mementoID) is permanently retired; target and live ledger before-copies were restored." : "Target and live ledger before-copies were restored."
         } catch {
@@ -219,6 +242,33 @@ struct MementoTransactionService {
             journal.diagnostic = "Explicit recovery is required from journal \(journal.transactionID): \(error.localizedDescription)"
         }
         try? journalStore.update(journal)
+    }
+
+    private func ensureRetired(_ id: String, preimage: Data, identifierURL: URL) throws {
+        var current = try Data(contentsOf: identifierURL)
+        if try MementoIdentifierEditing.isRetired(id, in: String(decoding: current, as: UTF8.self)) { return }
+        guard hash(current) == hash(preimage) else {
+            throw MementoTransactionError.recoveryRequired("The Identifier Ledger changed before retirement could be completed.")
+        }
+        let retired = try MementoIdentifierEditing.retiring(id, in: String(decoding: preimage, as: UTF8.self))
+        try replacer.replace(data: Data(retired.utf8), at: identifierURL)
+        current = try Data(contentsOf: identifierURL)
+        guard try MementoIdentifierEditing.isRetired(id, in: String(decoding: current, as: UTF8.self)) else {
+            throw MementoTransactionError.recoveryRequired("The Identifier Ledger did not validate permanent retirement of \(id).")
+        }
+    }
+
+    private func requireNoPendingRecovery(_ configuration: ProductionsConfiguration) throws {
+        let root = configuration.rootURL.standardizedFileURL.path
+        let pending: [MementoTransactionJournal]
+        do { pending = try journalStore.incomplete() }
+        catch { throw MementoTransactionError.journalFailed("Could not inspect Memento recovery journals: \(error.localizedDescription)") }
+        guard !pending.contains(where: {
+            ($0.productionsRootPath == nil || $0.productionsRootPath == root)
+                && ($0.terminalState == nil || $0.terminalState == .recoveryRequired)
+        }) else {
+            throw MementoTransactionError.recoveryRequired("An incomplete Memento transaction requires explicit recovery before another transaction can begin.")
+        }
     }
 
     private func canonicalTargetPath(_ targetID: String, state: ProductionsState) throws -> String {
@@ -269,6 +319,17 @@ enum MementoIdentifierEditing {
         }
         guard found else { throw MementoTransactionError.conflict("The MEM high-water counter is unavailable.") }
         return lines.joined(separator: "\n")
+    }
+    static func isRetired(_ id: String, in ledger: String) throws -> Bool {
+        let rows: [[String: String]]
+        if let canonical = try? MarkdownTable.parse(ledger, required: ["Type", "Prefix", "Minimum digits", "Last issued", "Next display"]) { rows = canonical }
+        else { rows = try MarkdownTable.parse(ledger, required: ["Identifier type", "Prefix", "Minimum digits", "Last issued", "Next display"]) }
+        guard let row = rows.first(where: { $0["Prefix"] == "MEM" }),
+              let lastIssued = Int(row["Last issued"] ?? ""),
+              let requested = Int(id.dropFirst(4)) else {
+            throw MementoTransactionError.conflict("The MEM high-water counter is unavailable or malformed.")
+        }
+        return lastIssued >= requested
     }
 }
 

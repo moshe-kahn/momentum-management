@@ -56,6 +56,62 @@ final class MementoTransactionsTests: XCTestCase {
         XCTAssertEqual(next.mementoID, "MEM-000003")
     }
 
+    func testFirstReplacementFailureCompletesRetirementAndNeverReusesID() throws {
+        let fixture = try cleanFixture(); defer { fixture.remove() }
+        let targetBefore = try fixture.data(at: "Workspace/TASK-000001/TASK-000001.md")
+        let ledgerBefore = try fixture.data(at: "Office/Threads/Mementos.md")
+        let journal = MemoryMementoJournal()
+
+        XCTAssertThrowsError(try service(journal: journal, replacer: FailOnceReplacer(failOn: 1)).create(configuration: fixture.configuration, targetID: "TASK-000001", draft: draft(), reload: { _ in fixture.load() }))
+
+        XCTAssertEqual(try fixture.data(at: "Workspace/TASK-000001/TASK-000001.md"), targetBefore)
+        XCTAssertEqual(try fixture.data(at: "Office/Threads/Mementos.md"), ledgerBefore)
+        XCTAssertEqual(journal.journals.last?.terminalState, .identifierRetiredRolledBack)
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md"), as: UTF8.self).contains("| 2 | `MEM-000003` |"))
+        let next = try service().create(configuration: fixture.configuration, targetID: "TASK-000001", draft: draft(), reload: { _ in fixture.load() })
+        XCTAssertEqual(next.mementoID, "MEM-000003")
+    }
+
+    func testRetirementRecoveryFailureRequiresRecoveryAndBlocksIDReuse() throws {
+        let fixture = try cleanFixture(); defer { fixture.remove() }
+        let before = try fixture.snapshot()
+        let journal = MemoryMementoJournal()
+        let replacer = FailOnCallsReplacer(failOn: [1, 4])
+
+        XCTAssertThrowsError(try service(journal: journal, replacer: replacer).create(configuration: fixture.configuration, targetID: "TASK-000001", draft: draft(), reload: { _ in fixture.load() })) { error in
+            guard case .recoveryRequired = error as? MementoTransactionError else { return XCTFail("Expected recoveryRequired, got \(error)") }
+        }
+
+        XCTAssertEqual(journal.journals.last?.terminalState, .recoveryRequired)
+        XCTAssertEqual(try fixture.snapshot(), before)
+        XCTAssertTrue(service(journal: journal).startupRecovery().contains { $0.mementoID == "MEM-000002" })
+        XCTAssertThrowsError(try service(journal: journal).create(configuration: fixture.configuration, targetID: "TASK-000001", draft: draft(), reload: { _ in fixture.load() })) { error in
+            guard case .recoveryRequired = error as? MementoTransactionError else { return XCTFail("Expected pending recovery to block reuse, got \(error)") }
+        }
+        XCTAssertTrue(String(decoding: try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md"), as: UTF8.self).contains("| 1 | `MEM-000002` |"))
+    }
+
+    func testStableLockExcludesConcurrentTransactionAfterIdentifierReplacement() throws {
+        let fixture = try cleanFixture(); defer { fixture.remove() }
+        let lockDirectory = FileManager.default.temporaryDirectory.appending(path: "memento-locks-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: lockDirectory) }
+        let locking = LocalMementoTransactionLocking(directory: lockDirectory)
+        let blocker = BlockingAfterFirstReplacement()
+        let outcome = ThreadOutcome()
+        let attempt = ConcurrentMementoAttempt(fixture: fixture, blocker: blocker, locking: locking, outcome: outcome, date: date)
+
+        DispatchQueue.global().async { attempt.run() }
+
+        XCTAssertEqual(blocker.replaced.wait(timeout: .now() + 5), .success, "First transaction did not reach the post-identifier boundary.")
+        XCTAssertThrowsError(try service(locking: locking).create(configuration: fixture.configuration, targetID: "TASK-000001", draft: draft(), reload: { _ in fixture.load() })) {
+            XCTAssertEqual($0 as? MementoTransactionError, .lockUnavailable)
+        }
+        blocker.release.signal()
+        XCTAssertEqual(outcome.finished.wait(timeout: .now() + 5), .success)
+        XCTAssertNil(outcome.error)
+        XCTAssertEqual(fixture.load().mementos.map(\.id), ["MEM-000002"])
+    }
+
     func testLockConflictAndConcurrentHashChangeStopWithoutIssuance() throws {
         let fixture = try cleanFixture(); defer { fixture.remove() }
         let before = try fixture.snapshot(), deniedJournal = MemoryMementoJournal()
@@ -85,7 +141,7 @@ final class MementoTransactionsTests: XCTestCase {
         return fixture
     }
     private func draft(payload: String? = nil) -> MementoDraft { MementoDraft(summary: "Implementation pause", currentState: "Repository tests passed at captured commit.", naturalResumePoint: "Continue transaction tests", openCrumbs: ["CRMB-000001"], extendedPayload: payload) }
-    private func service(journal: MemoryMementoJournal = MemoryMementoJournal(), replacer: (any AtomicFileReplacing)? = nil) -> MementoTransactionService { MementoTransactionService(journalStore: journal, replacer: replacer, now: { self.date }) }
+    private func service(journal: MemoryMementoJournal = MemoryMementoJournal(), replacer: (any AtomicFileReplacing)? = nil, locking: any MementoTransactionLocking = LocalMementoTransactionLocking()) -> MementoTransactionService { MementoTransactionService(journalStore: journal, replacer: replacer, locking: locking, now: { self.date }) }
     private var emptyMementos: String { "| Memento ID | Target | Summary | Resume point | Created | Location |\n| --- | --- | --- | --- | --- | --- |" }
 }
 
@@ -113,5 +169,66 @@ private final class FailOnceReplacer: AtomicFileReplacing {
         count += 1
         if count == failOn { throw NSError(domain: "MementoTransactionsTests", code: count) }
         try durable.replace(data: data, at: target)
+    }
+}
+
+private final class FailOnCallsReplacer: AtomicFileReplacing {
+    private var count = 0
+    private let failures: Set<Int>
+    private let durable = DurableReplacement()
+    init(failOn: Set<Int>) { failures = failOn }
+    func replace(data: Data, at target: URL) throws {
+        count += 1
+        if failures.contains(count) { throw NSError(domain: "MementoTransactionsTests", code: count) }
+        try durable.replace(data: data, at: target)
+    }
+}
+
+private final class BlockingAfterFirstReplacement: AtomicFileReplacing, @unchecked Sendable {
+    let replaced = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let durable = DurableReplacement()
+    private var count = 0
+
+    func replace(data: Data, at target: URL) throws {
+        count += 1
+        try durable.replace(data: data, at: target)
+        if count == 1 {
+            replaced.signal()
+            guard release.wait(timeout: .now() + 5) == .success else { throw NSError(domain: "MementoTransactionsTests", code: 99) }
+        }
+    }
+}
+
+private final class ThreadOutcome: @unchecked Sendable {
+    let finished = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var storedError: Error?
+    var error: Error? { lock.withLock { storedError } }
+    func record(_ error: Error) { lock.withLock { storedError = error } }
+}
+
+private final class ConcurrentMementoAttempt: @unchecked Sendable {
+    private let fixture: SyntheticProductionsFixture
+    private let blocker: BlockingAfterFirstReplacement
+    private let locking: LocalMementoTransactionLocking
+    private let outcome: ThreadOutcome
+    private let date: Date
+
+    init(fixture: SyntheticProductionsFixture, blocker: BlockingAfterFirstReplacement, locking: LocalMementoTransactionLocking, outcome: ThreadOutcome, date: Date) {
+        self.fixture = fixture; self.blocker = blocker; self.locking = locking
+        self.outcome = outcome; self.date = date
+    }
+
+    func run() {
+        let journal = MemoryMementoJournal()
+        let service = MementoTransactionService(journalStore: journal, replacer: blocker, locking: locking, now: { self.date })
+        let draft = MementoDraft(summary: "Implementation pause", currentState: "Repository tests passed at captured commit.", naturalResumePoint: "Continue transaction tests", openCrumbs: ["CRMB-000001"], extendedPayload: nil)
+        do {
+            _ = try service.create(configuration: fixture.configuration, targetID: "TASK-000001", draft: draft, reload: { _ in self.fixture.load() })
+        } catch {
+            outcome.record(error)
+        }
+        outcome.finished.signal()
     }
 }
