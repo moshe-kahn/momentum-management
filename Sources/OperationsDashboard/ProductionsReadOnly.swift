@@ -635,7 +635,7 @@ enum WorkspaceMarkdown {
             if trimmed.hasPrefix("```") { continue }
             if let colon = line.firstIndex(of: ":") {
                 let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
-                if key.range(of: #"^[A-Za-z][A-Za-z0-9 /()_-]*$"#, options: .regularExpression) != nil {
+                if key.range(of: #"^[A-Za-z][A-Za-z0-9, /()_-]*$"#, options: .regularExpression) != nil {
                     currentKey = key
                     result[key] = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
                     continue

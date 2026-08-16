@@ -3,6 +3,56 @@ import XCTest
 @testable import OperationsDashboard
 
 final class ProductionsReadOnlyTests: XCTestCase {
+    func testCanonicalCommaBearingCoreRecordFieldKeyRemainsDistinct() throws {
+        let record = try WorkspaceMarkdown.parse("""
+        # TASK-000001
+
+        ## Core Record
+
+        ```text
+        Primary department: Studio
+        Secondary departments, if any: Workshop
+        Objective or question: Preserve this first line.
+        Unsupported.key: Remain continuation text.
+        Preserve this second line too.
+        ```
+        """)
+
+        XCTAssertEqual(record.field("Primary department"), "Studio")
+        XCTAssertEqual(record.field("Secondary departments, if any"), "Workshop")
+        XCTAssertEqual(
+            record.field("Objective or question"),
+            "Preserve this first line.\nUnsupported.key: Remain continuation text.\nPreserve this second line too."
+        )
+        XCTAssertEqual(record.field("Unsupported.key"), "")
+    }
+
+    func testCommaBearingSecondaryDepartmentDoesNotContaminateLoadedPrimaryDepartment() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let record = fixture.workspaceRecord.replacingOccurrences(
+            of: "Primary department: Office\n",
+            with: "Primary department: Studio\nSecondary departments, if any: Workshop\n"
+        )
+        try fixture.add(record, at: "Workspace/TASK-000001/TASK-000001.md")
+
+        let state = fixture.load()
+        let work = try XCTUnwrap(state.work.first)
+
+        XCTAssertTrue(state.issues.isEmpty, state.issues.map(\.message).joined(separator: "\n"))
+        XCTAssertEqual(work.workspace?.field("Primary department"), "Studio")
+        XCTAssertEqual(work.workspace?.field("Secondary departments, if any"), "Workshop")
+        XCTAssertEqual(work.department, "Studio")
+        XCTAssertEqual(
+            ProductionsDashboardPresentation.items(
+                for: .workItems,
+                in: state,
+                departmentFilter: ProductionsDepartmentFilter(department: "Studio")
+            ).map(\.targetID),
+            ["TASK-000001"]
+        )
+    }
+
     func testCompleteSyntheticContractLoadsWithoutMutatingProductions() throws {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
