@@ -13,7 +13,7 @@ protocol ProductionsReading {
 
 extension LocalFileSystem: ProductionsReading {
     func isSymbolicLink(at url: URL) throws -> Bool {
-        try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
     }
 }
 
@@ -210,7 +210,7 @@ struct ProductionsLoader {
         let workByID = Dictionary(uniqueKeysWithValues: work.map { ($0.id, $0) })
         let flow = parseFlow(flowRows, configuration: validated, issues: &issues)
         let inbox = assembleInbox(flow: flow.filter { $0.stage == "Inbox" }, configuration: validated, issues: &issues)
-        let canvas = parseCanvas(table(at: .canvas, configuration: validated, required: ["Occurred", "Work ID", "Event", "Reason", "Context"], issues: &issues), work: workByID, issues: &issues)
+        let canvas = parseCanvas(canvasRows(configuration: validated, issues: &issues), work: workByID, issues: &issues)
         let validTargets = Set(workByID.keys).union(flow.filter { $0.stage == "Processing" }.map(\.id))
         let crumbs = parseCrumbs(table(at: .crumbs, configuration: validated, required: ["Crumb ID", "Kind", "Target", "Priority", "Summary", "Created", "Location"], issues: &issues), targets: validTargets, configuration: validated, issues: &issues)
         let mementos = parseMementos(table(at: .mementos, configuration: validated, required: ["Memento ID", "Target", "Summary", "Resume point", "Created", "Location"], issues: &issues), work: workByID, processing: flow.filter { $0.stage == "Processing" }, crumbs: crumbs, configuration: validated, issues: &issues)
@@ -222,6 +222,19 @@ struct ProductionsLoader {
         let url = configuration.url(path.rawValue); guard reader.exists(at: url), reader.isReadable(at: url) else { return [] }
         do { return try MarkdownTable.parse(String(decoding: reader.readData(at: url), as: UTF8.self), required: required) }
         catch { issues.append(.malformed("\(path.rawValue): \(error.localizedDescription)")); return [] }
+    }
+    private func canvasRows(configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [[String: String]] {
+        let path = ProductionsPath.canvas.rawValue
+        let url = configuration.url(path)
+        guard reader.exists(at: url), reader.isReadable(at: url) else { return [] }
+        do {
+            let result = try CanvasMarkdown.parse(String(decoding: reader.readData(at: url), as: UTF8.self))
+            if result.isFragmented { issues.append(.malformed("\(path): fragmented or orphaned Canvas rows")) }
+            return result.rows
+        } catch {
+            issues.append(.malformed("\(path): \(error.localizedDescription)"))
+            return []
+        }
     }
     private func parseWork(_ rows: [[String: String]], kind: WorkKind, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [WorkItem] { rows.compactMap { row in
         let id = row["\(kind.rawValue) ID"] ?? ""; guard identifier(id, prefix: kind.identifierPrefix) else { issues.append(.malformed("invalid \(kind.rawValue) ID \(id)")); return nil }
@@ -286,11 +299,53 @@ struct ProductionsLoader {
     private func parseCrumbs(_ rows: [[String: String]], targets: Set<String>, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [Crumb] {
         var seen = Set<String>()
         return rows.compactMap { row in
-            let id = row["Crumb ID"] ?? "", target = row["Target"] ?? "", location = MarkdownTable.resolvedPath(row["Location"] ?? "", relativeTo: "Office/Threads")
+            let id = row["Crumb ID"] ?? "", target = row["Target"] ?? ""
             guard seen.insert(id).inserted else { issues.append(.duplicate("Crumb ID \(id)")); return nil }
-            guard identifier(id, prefix: "CRMB"), targets.contains(target), ["Idea", "Decision", "Action"].contains(row["Kind"] ?? ""), reader.exists(at: configuration.url(location)), (try? reader.isSymbolicLink(at: configuration.url(location))) == false else { issues.append(.malformed("Crumb \(id)")); return nil }
+            guard identifier(id, prefix: "CRMB"), targets.contains(target), ["Idea", "Decision", "Action"].contains(row["Kind"] ?? ""),
+                  let location = resolveCrumbLocation(row["Location"] ?? "", configuration: configuration) else {
+                issues.append(.malformed("Crumb \(id)")); return nil
+            }
             return Crumb(id: id, kind: row["Kind"]!, target: target, priority: row["Priority"] ?? "", summary: row["Summary"] ?? "", location: location)
         }
+    }
+    private func resolveCrumbLocation(_ value: String, configuration: ProductionsConfiguration) -> String? {
+        guard let reference = MarkdownTable.locationReference(value) else { return nil }
+        let root = configuration.rootURL.standardizedFileURL
+        let base = reference.isRootRelative ? root : root.appending(path: "Office/Threads", directoryHint: .isDirectory)
+        guard let target = lexicallyResolvedURL(reference.path, relativeTo: base) else { return nil }
+        guard target.path != root.path,
+              target.path.hasPrefix(root.path + "/"),
+              target.pathExtension.lowercased() == "md",
+              reader.exists(at: target),
+              reader.isReadable(at: target),
+              (try? reader.isDirectory(at: target)) == false else { return nil }
+        let relativeComponents = target.pathComponents.dropFirst(root.pathComponents.count)
+        var componentURL = root
+        for component in relativeComponents {
+            componentURL.append(path: component)
+            guard (try? reader.isSymbolicLink(at: componentURL)) == false else { return nil }
+        }
+        if let anchor = reference.anchor {
+            guard let data = try? reader.readData(at: target),
+                  MarkdownTable.contains(anchor: anchor, in: String(decoding: data, as: UTF8.self)) else { return nil }
+        }
+        let relativePath = relativeComponents.joined(separator: "/")
+        return relativePath + (reference.anchor.map { "#\($0)" } ?? "")
+    }
+    private func lexicallyResolvedURL(_ relativePath: String, relativeTo base: URL) -> URL? {
+        guard !relativePath.hasPrefix("/") else { return nil }
+        var components = base.pathComponents
+        for component in relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init) {
+            switch component {
+            case "", ".": continue
+            case "..":
+                guard components.count > 1 else { return nil }
+                components.removeLast()
+            default: components.append(component)
+            }
+        }
+        guard components.count > 1 else { return nil }
+        return URL(fileURLWithPath: NSString.path(withComponents: components), isDirectory: false)
     }
     private struct MementoTarget {
         let path: String
@@ -443,6 +498,75 @@ enum MarkdownTable {
     }
     private static func rawPath(_ value: String) -> String { if let match = value.range(of: #"\]\(([^)]+)\)"#, options: .regularExpression) { return String(String(value[match]).dropFirst(2).dropLast()) }; return value }
     static func values(_ value: String) -> [String] { value == "—" ? [] : value.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) } }
+}
+
+struct CanvasMarkdownResult {
+    let rows: [[String: String]]
+    let isFragmented: Bool
+}
+
+enum CanvasMarkdown {
+    static let headers = ["Occurred", "Work ID", "Event", "Reason", "Context"]
+    private static let events = ["Placed", "Engaged", "Cleared"]
+
+    static func parse(_ markdown: String) throws -> CanvasMarkdownResult {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard let headerIndex = lines.firstIndex(where: { MarkdownTable.cells($0) == headers }),
+              headerIndex + 1 < lines.count,
+              isSeparator(lines[headerIndex + 1]) else {
+            throw ProductionsConfigurationError.malformed("required table header not found")
+        }
+
+        var rows: [[String: String]] = []
+        var isFragmented = false
+        var withinCanonicalTable = true
+        for line in lines.dropFirst(headerIndex + 2) {
+            if withinCanonicalTable {
+                guard line.hasPrefix("|") else {
+                    withinCanonicalTable = false
+                    continue
+                }
+                rows.append(try row(from: line))
+                continue
+            }
+
+            guard resemblesCanvasRow(line) else { continue }
+            isFragmented = true
+            let values = MarkdownTable.cells(line)
+            if values == headers || isSeparator(line) { continue }
+            if values.count == headers.count {
+                rows.append(Dictionary(uniqueKeysWithValues: zip(headers, values)))
+            }
+        }
+        return CanvasMarkdownResult(rows: rows, isFragmented: isFragmented)
+    }
+
+    private static func row(from line: String) throws -> [String: String] {
+        let values = MarkdownTable.cells(line)
+        guard values.count == headers.count else {
+            throw ProductionsConfigurationError.malformed("malformed table row")
+        }
+        return Dictionary(uniqueKeysWithValues: zip(headers, values))
+    }
+
+    private static func resemblesCanvasRow(_ line: String) -> Bool {
+        guard line.hasPrefix("|"), line.hasSuffix("|") else { return false }
+        let values = MarkdownTable.cells(line)
+        if values == headers || isSeparator(line) { return true }
+        guard values.count == headers.count else {
+            return line.range(of: #"^\|\s*[0-9]{4}-[0-9]{2}-[0-9]{2}"#, options: .regularExpression) != nil
+        }
+        return values[0].range(of: #"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"#, options: .regularExpression) != nil
+            || values[1].range(of: #"^(TASK|IDEA|PROJ|INIT)-[0-9]{4,}$"#, options: .regularExpression) != nil
+            || events.contains(values[2])
+    }
+
+    private static func isSeparator(_ line: String) -> Bool {
+        let values = MarkdownTable.cells(line)
+        return values.count == headers.count && values.allSatisfy {
+            $0.range(of: #"^:?-{3,}:?$"#, options: .regularExpression) != nil
+        }
+    }
 }
 
 enum WorkspaceMarkdown {

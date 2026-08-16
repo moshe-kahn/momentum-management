@@ -259,7 +259,11 @@ struct CanvasWorkTransactionService {
 
     private func parseCanvasRows(_ canvas: String) throws -> [[String: String]] {
         do {
-            let rows = try MarkdownTable.parse(canvas, required: ["Occurred", "Work ID", "Event", "Reason", "Context"])
+            let result = try CanvasMarkdown.parse(canvas)
+            guard !result.isFragmented else {
+                throw CanvasWorkTransactionError.conflict("Canvas is fragmented or contains orphaned rows.")
+            }
+            let rows = result.rows
             guard rows.allSatisfy({ ["Placed", "Engaged", "Cleared"].contains($0["Event"] ?? "") }) else {
                 throw CanvasWorkTransactionError.conflict("Canvas contains an invalid event.")
             }

@@ -104,6 +104,97 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertTrue(symlinkState.issues.contains(.malformed("Memento MEM-000001")))
     }
 
+    func testCanonicalCrumbMarkdownFragmentResolvesAfterFileValidation() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        try fixture.add(fixture.workspaceRecord + "\n\n## Open Crumbs\n\n- Provider taxonomy follow-up.", at: "Workspace/TASK-000001/TASK-000001.md")
+        fixture.replaceCrumbs(fixture.crumbLedger(location: "[TASK-000001](../../Workspace/TASK-000001/TASK-000001.md#open-crumbs)"))
+        let reader = RecordingProductionsReader()
+
+        let state = ProductionsLoader(reader: reader).load(configuration: fixture.configuration)
+
+        XCTAssertEqual(state.crumbs.first?.location, "Workspace/TASK-000001/TASK-000001.md#open-crumbs")
+        XCTAssertFalse(state.issues.contains(.malformed("Crumb CRMB-000001")))
+        XCTAssertTrue(reader.existenceChecks.contains { $0.hasSuffix("Workspace/TASK-000001/TASK-000001.md") })
+        XCTAssertFalse(reader.existenceChecks.contains { $0.contains("#open-crumbs") })
+    }
+
+    func testCrumbMissingAndMismatchedFragmentsAreRejected() throws {
+        let mismatched = try SyntheticProductionsFixture()
+        defer { mismatched.remove() }
+        try mismatched.add(mismatched.workspaceRecord + "\n\n## Open Crumbs\n\n- Follow-up.", at: "Workspace/TASK-000001/TASK-000001.md")
+        mismatched.replaceCrumbs(mismatched.crumbLedger(location: "[TASK-000001](../../Workspace/TASK-000001/TASK-000001.md#missing-anchor)"))
+        XCTAssertTrue(mismatched.load().crumbs.isEmpty)
+        XCTAssertTrue(mismatched.load().issues.contains(.malformed("Crumb CRMB-000001")))
+
+        let missing = try SyntheticProductionsFixture()
+        defer { missing.remove() }
+        missing.replaceCrumbs(missing.crumbLedger(location: "[missing](../../Workspace/TASK-000001/missing.md#open-crumbs)"))
+        XCTAssertTrue(missing.load().crumbs.isEmpty)
+        XCTAssertTrue(missing.load().issues.contains(.malformed("Crumb CRMB-000001")))
+    }
+
+    func testCrumbTraversalDirectoryAndSymlinkTargetsAreRejected() throws {
+        let traversal = try SyntheticProductionsFixture()
+        defer { traversal.remove() }
+        let outsideName = "escaped-crumb-\(UUID().uuidString).md"
+        try traversal.addOutsideRoot("# Outside", named: outsideName)
+        traversal.replaceCrumbs(traversal.crumbLedger(location: "[outside](../../../\(outsideName))"))
+        XCTAssertTrue(traversal.load().crumbs.isEmpty)
+        XCTAssertTrue(traversal.load().issues.contains(.malformed("Crumb CRMB-000001")))
+
+        let directory = try SyntheticProductionsFixture()
+        defer { directory.remove() }
+        try directory.addDirectory(at: "Workspace/TASK-000001/directory.md")
+        directory.replaceCrumbs(directory.crumbLedger(location: "[directory](../../Workspace/TASK-000001/directory.md)"))
+        XCTAssertTrue(directory.load().crumbs.isEmpty)
+        XCTAssertTrue(directory.load().issues.contains(.malformed("Crumb CRMB-000001")))
+
+        let symlink = try SyntheticProductionsFixture()
+        defer { symlink.remove() }
+        try symlink.addMarkdownSymlink(at: "Workspace/TASK-000001/crumb-link.md")
+        XCTAssertTrue(try LocalFileSystem().isSymbolicLink(at: symlink.url(at: "Workspace/TASK-000001/crumb-link.md")))
+        symlink.replaceCrumbs(symlink.crumbLedger(location: "[link](../../Workspace/TASK-000001/crumb-link.md)"))
+        XCTAssertTrue(symlink.load().crumbs.isEmpty)
+        XCTAssertTrue(symlink.load().issues.contains(.malformed("Crumb CRMB-000001")))
+    }
+
+    func testFragmentedCanvasRowsAreVisibleAndLatestPhysicalBoundaryControlsMembership() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        fixture.replaceCanvas("| Occurred | Work ID | Event | Reason | Context |\n| --- | --- | --- | --- | --- |\n| 2026-08-11T12:00:00Z | TASK-000001 | Placed | focus | test |\n| 2026-08-11T12:01:00Z | TASK-000001 | Engaged | work | test |\n\n## Interrupted history\n\n| 2026-08-11T12:02:00Z | TASK-000001 | Cleared | stop | test |")
+
+        let state = fixture.load()
+
+        XCTAssertEqual(state.canvas.map(\.event), ["Placed", "Engaged", "Cleared"])
+        XCTAssertFalse(state.canvasCurrentIDs.contains("TASK-000001"))
+        XCTAssertTrue(state.issues.contains(.malformed("Office/Threads/Canvas.md: fragmented or orphaned Canvas rows")))
+    }
+
+    func testCanonicalContiguousCanvasTableMayBeFollowedByRulesProse() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        fixture.replaceCanvas("| Occurred | Work ID | Event | Reason | Context |\n| --- | --- | --- | --- | --- |\n| 2026-08-11T12:00:00Z | TASK-000001 | Placed | focus | test |\n| 2026-08-11T12:01:00Z | TASK-000001 | Engaged | work | test |\n\n## Rules\n\n- Preserve physical order.")
+
+        let state = fixture.load()
+
+        XCTAssertEqual(state.canvas.map(\.event), ["Placed", "Engaged"])
+        XCTAssertTrue(state.canvasCurrentIDs.contains("TASK-000001"))
+        XCTAssertFalse(state.issues.contains(.malformed("Office/Threads/Canvas.md: fragmented or orphaned Canvas rows")))
+    }
+
+    func testNarrativeCurrentMementoHeadingRemainsAStrictVisibleError() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let record = fixture.workspaceRecord.components(separatedBy: "\n\n## Current Memento").first!
+            + "\n\n## Current Memento\n\nThis legacy narrative is not a structured checkpoint."
+        try fixture.add(record, at: "Workspace/TASK-000001/TASK-000001.md")
+
+        let state = fixture.load()
+
+        XCTAssertTrue(state.issues.contains(.malformed("TASK-000001 Workspace: Malformed Productions configuration: partial Current Memento section")))
+    }
+
     func testUnreferencedInboxFileAppearsAsOneUnregisteredItemWithoutWrites() throws {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
@@ -178,16 +269,21 @@ final class SyntheticProductionsFixture {
         let url = root.appending(path: path)
         try manager.createSymbolicLink(at: url, withDestinationURL: root.appending(path: "Workspace/TASK-000001/TASK-000001.md"))
     }
+    func addMarkdownSymlink(at path: String) throws { try addMementoSymlink(at: path) }
+    func addDirectory(at path: String) throws { try manager.createDirectory(at: root.appending(path: path), withIntermediateDirectories: true) }
     func replaceFlow(_ text: String) { try? write(text, "Office/Flow.md") }
     func replaceLedger(_ text: String) { try? write(text, "Warehouse/Reference/Identifier Ledger.md") }
     func replaceMementos(_ text: String) { try? write(text, "Office/Threads/Mementos.md") }
+    func replaceCrumbs(_ text: String) { try? write(text, "Office/Threads/Crumbs.md") }
     func replaceCanvas(_ text: String) { try? write(text, "Office/Threads/Canvas.md") }
     func data(at path: String) throws -> Data { try Data(contentsOf: root.appending(path: path)) }
+    func url(at path: String) -> URL { root.appending(path: path) }
     func snapshot() throws -> [String: Data] { let files = try manager.subpathsOfDirectory(atPath: root.path).sorted(); return try Dictionary(uniqueKeysWithValues: files.map { path in let url = root.appending(path: path); return (path, (try? Data(contentsOf: url)) ?? Data()) }) }
     private func write(_ text: String, _ path: String) throws { let url = root.appending(path: path); try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true); try Data(text.utf8).write(to: url) }
     var flow: String { "| Entry ID | Label | Type | Stage | Priority | Steward | Department | Product | Source | Related work | Location | Summary | Next disposition | Created | Updated |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| FLOW-000001 | Inbox item | Note | Inbox | High | Office | Office | — | test | TASK-000001 | `Office/Inbox/FLOW-000001.md` | Incoming | Review | 2026-08-11 | 2026-08-11 |\n| BND-000001 | Bundle | Bundle | Processing | Medium | Office | Office | — | test | TASK-000001 | `Office/Processing/BND-000001 - Bundle/` | Processing | Review | 2026-08-11 | 2026-08-11 |" }
     var identifierLedger: String { "| Identifier type | Prefix | Minimum digits | Last issued | Next display |\n| --- | --- | --- | --- | --- |\n| Inbox / routing entry | FLOW | 6 | 1 | `FLOW-000002` |\n| Memento | MEM | 6 | 1 | `MEM-000002` |" }
     func mementoLedger(location: String) -> String { "| Memento ID | Target | Summary | Resume point | Created | Location |\n| --- | --- | --- | --- | --- | --- |\n| MEM-000001 | TASK-000001 | Pause | Resume here | 2026-08-11 | \(location) |" }
+    func crumbLedger(location: String) -> String { "| Crumb ID | Kind | Target | Priority | Summary | Created | Location |\n| --- | --- | --- | --- | --- | --- | --- |\n| CRMB-000001 | Action | TASK-000001 | High | Continue | 2026-08-11 | \(location) |" }
     var workspaceRecord: String { "# TASK-000001\n\n## Core Record\n\n```text\nTitle: Synthetic task\nID: TASK-000001\nType: Task\nAssociated product(s): —\nPrimary department: Office\nObjective or question: Complete the synthetic objective.\nNext step: Resume here\nCompletion or resolution criterion: Verify the synthetic outcome.\nLast validated state: Synthetic repository tests passed.\nRelevant locations: \(root.path)\n```\n\n## Steps\n\n- [ ] Complete synthetic validation.\n\n## Current Memento\n\nMemento ID: MEM-000001\nCreated: 2026-08-11\nCurrent state: Synthetic repository tests passed.\nNatural resume point: Resume here\nOpen Crumbs: CRMB-000001\nExtended payload: —" }
     private var taskRegistry: String { "| Task ID | Title | State | Priority | Current lead | Initiative | Project | Depends on | Short description | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| TASK-000001 | Synthetic task | Active / Current | High | Office | — | — | — | test | [task](../../Workspace/TASK-000001/TASK-000001.md) |" }
 }

@@ -103,6 +103,21 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         XCTAssertTrue(journal.journals.isEmpty)
     }
 
+    func testFragmentedBaselineBlocksStartAndStopBeforeJournalAndWrite() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        fixture.replaceCanvas(emptyCanvas + "\n| 2026-08-13T18:29:00Z | TASK-000001 | Placed | Earlier. | Test. |\n\n| 2026-08-13T18:29:30Z | TASK-000001 | Cleared | Later. | Fragmented. |")
+        let before = try fixture.snapshot(); let journal = MemoryCanvasJournal()
+
+        for action in [CanvasWorkAction.start, .stop] {
+            XCTAssertThrowsError(try service(journal: journal).perform(action: action, configuration: config(fixture), work: task(fixture), reason: "Authorized action.", context: "Test.", reload: { _ in fixture.load() })) { error in
+                guard case .conflict = error as? CanvasWorkTransactionError else { return XCTFail("Expected contract conflict, got \(error)") }
+            }
+        }
+
+        XCTAssertEqual(try fixture.snapshot(), before)
+        XCTAssertTrue(journal.journals.isEmpty)
+    }
+
     func testLockConflictStopsBeforeJournalAndWrite() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         let journal = MemoryCanvasJournal(); let before = try fixture.snapshot()
