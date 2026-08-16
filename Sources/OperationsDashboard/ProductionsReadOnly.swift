@@ -129,6 +129,12 @@ struct ProductRecord: Identifiable, Equatable {
     let canonicalWorkspace: String
 }
 
+struct DepartmentRecord: Identifiable, Equatable {
+    let name: String
+    let function: String
+    var id: String { name }
+}
+
 struct WorkItem: Identifiable, Equatable {
     let id: String
     let kind: WorkKind
@@ -157,9 +163,23 @@ struct FlowItem: Identifiable, Equatable {
     let viewIdentity: String
     let flowID: String?
     let label, type, stage, priority, location, summary: String
+    let department: String?
     let bundleContent: String?
     var id: String { viewIdentity }
     var isUnregistered: Bool { flowID == nil }
+
+    init(viewIdentity: String, flowID: String?, label: String, type: String, stage: String, priority: String, location: String, summary: String, department: String? = nil, bundleContent: String?) {
+        self.viewIdentity = viewIdentity
+        self.flowID = flowID
+        self.label = label
+        self.type = type
+        self.stage = stage
+        self.priority = priority
+        self.location = location
+        self.summary = summary
+        self.department = department
+        self.bundleContent = bundleContent
+    }
 }
 struct CanvasEvent: Equatable { let occurred: Date; let workID, event, reason, context: String; let sequence: Int }
 struct Crumb: Identifiable, Equatable { let id, kind, target, priority, summary, location: String }
@@ -176,14 +196,15 @@ struct ProductionsState: Equatable {
     let processing: [FlowItem]
     let work: [WorkItem]
     let products: [ProductRecord]
+    let departments: [DepartmentRecord]
     let canvas: [CanvasEvent]
     let crumbs: [Crumb]
     let mementos: [Memento]
     let issues: [ProductionsIssue]
 
-    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], issues: [ProductionsIssue]) {
+    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], departments: [DepartmentRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], issues: [ProductionsIssue]) {
         self.configuration = configuration; self.inbox = inbox; self.processing = processing
-        self.work = work; self.products = products; self.canvas = canvas; self.crumbs = crumbs
+        self.work = work; self.products = products; self.departments = departments; self.canvas = canvas; self.crumbs = crumbs
         self.mementos = mementos; self.issues = issues
     }
     var canvasCurrentIDs: Set<String> { Set(canvas.sorted { $0.sequence < $1.sequence }.reduce(into: [String: String]()) { if $1.event == "Placed" || $1.event == "Cleared" { $0[$1.workID] = $1.event } }.filter { $0.value == "Placed" }.map(\.key)) }
@@ -206,7 +227,7 @@ struct ProductionsLoader {
         for id in duplicateWorkIDs { issues.append(.duplicate("Registry work ID \(id)")) }
         work = work.reduce(into: []) { result, item in if !result.contains(where: { $0.id == item.id }) { result.append(item) } }
         let products = parseProducts(table(at: .products, configuration: validated, required: ["Product ID", "Product", "Lifecycle", "Current lead", "Related initiatives / products", "Canonical workspace"], issues: &issues), issues: &issues)
-        _ = table(at: .departments, configuration: validated, required: ["Department", "Function"], issues: &issues)
+        let departments = parseDepartments(table(at: .departments, configuration: validated, required: ["Department", "Function"], issues: &issues))
         let workByID = Dictionary(uniqueKeysWithValues: work.map { ($0.id, $0) })
         let flow = parseFlow(flowRows, configuration: validated, issues: &issues)
         let inbox = assembleInbox(flow: flow.filter { $0.stage == "Inbox" }, configuration: validated, issues: &issues)
@@ -214,7 +235,7 @@ struct ProductionsLoader {
         let validTargets = Set(workByID.keys).union(flow.filter { $0.stage == "Processing" }.map(\.id))
         let crumbs = parseCrumbs(table(at: .crumbs, configuration: validated, required: ["Crumb ID", "Kind", "Target", "Priority", "Summary", "Created", "Location"], issues: &issues), targets: validTargets, configuration: validated, issues: &issues)
         let mementos = parseMementos(table(at: .mementos, configuration: validated, required: ["Memento ID", "Target", "Summary", "Resume point", "Created", "Location"], issues: &issues), work: workByID, processing: flow.filter { $0.stage == "Processing" }, crumbs: crumbs, configuration: validated, issues: &issues)
-        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, canvas: canvas, crumbs: crumbs, mementos: mementos, issues: issues)
+        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, departments: departments, canvas: canvas, crumbs: crumbs, mementos: mementos, issues: issues)
     }
 
     private func validatePath(_ path: ProductionsPath, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) { let url = configuration.url(path.rawValue, directory: path == .inbox || path == .processing); if !reader.exists(at: url) { issues.append(.missing(path.rawValue)) } else if !reader.isReadable(at: url) { issues.append(.unreadable(path.rawValue)) } }
@@ -264,6 +285,9 @@ struct ProductionsLoader {
             return ProductRecord(id: id, name: row["Product"] ?? "", lifecycle: row["Lifecycle"] ?? "", lead: row["Current lead"] ?? "", related: MarkdownTable.values(row["Related initiatives / products"] ?? ""), canonicalWorkspace: workspace)
         }
     }
+    private func parseDepartments(_ rows: [[String: String]]) -> [DepartmentRecord] {
+        rows.map { DepartmentRecord(name: $0["Department"] ?? "", function: $0["Function"] ?? "") }
+    }
     private func parseFlow(_ rows: [[String: String]], configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [FlowItem] { rows.compactMap { row in
         let id = row["Entry ID"] ?? ""; let stage = row["Stage"] ?? ""; guard (stage == "Inbox" && identifier(id, prefix: "FLOW")) || (stage == "Processing" && identifier(id, prefix: "BND")) else { issues.append(.malformed("Flow \(id) stage or identifier")); return nil }
         let rawLocation = MarkdownTable.rootPath(row["Location"] ?? "")
@@ -272,7 +296,9 @@ struct ProductionsLoader {
         if stage == "Inbox", !isImmediateInboxPayload(location) { issues.append(.mismatch("Flow \(id) Inbox location")); return nil }
         if stage == "Processing", location.hasPrefix("Office/Inbox/") { issues.append(.mismatch("Flow \(id) Processing location")); return nil }
         var bundle: String?; if stage == "Processing" { let recordPath = "\(location)/\(id).md", record = configuration.url(recordPath); guard safeRootPath(recordPath, configuration: configuration), reader.exists(at: record), reader.isReadable(at: record) else { issues.append(.unresolved("\(id) bundle record")); return nil }; bundle = try? String(decoding: reader.readData(at: record), as: UTF8.self); if !(bundle?.contains("## Bundle Record") == true && bundle?.contains("## Processing State") == true && bundle?.contains("## Contents") == true) { issues.append(.malformed("\(id) bundle sections")) } }
-        return FlowItem(viewIdentity: "flow:\(id)", flowID: id, label: row["Label"] ?? "", type: row["Type"] ?? "", stage: stage, priority: row["Priority"] ?? "", location: location, summary: row["Summary"] ?? "", bundleContent: bundle)
+        let rawDepartment = (row["Department"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let department = rawDepartment.isEmpty || rawDepartment == "—" ? nil : rawDepartment
+        return FlowItem(viewIdentity: "flow:\(id)", flowID: id, label: row["Label"] ?? "", type: row["Type"] ?? "", stage: stage, priority: row["Priority"] ?? "", location: location, summary: row["Summary"] ?? "", department: department, bundleContent: bundle)
     } }
     private func assembleInbox(flow: [FlowItem], configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) -> [FlowItem] {
         let inboxURL = configuration.url(ProductionsPath.inbox.rawValue, directory: true)

@@ -11,7 +11,11 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertTrue(state.issues.isEmpty, state.issues.map(\.message).joined(separator: "\n"))
         XCTAssertEqual(state.inbox.compactMap(\.flowID), ["FLOW-000001"])
         XCTAssertEqual(state.processing.compactMap(\.flowID), ["BND-000001"])
+        XCTAssertEqual(state.inbox.first?.department, "Office")
+        XCTAssertEqual(state.processing.first?.department, "Office")
         XCTAssertEqual(state.work.map(\.id), ["TASK-000001"])
+        XCTAssertEqual(state.work.first?.department, "Office")
+        XCTAssertEqual(state.departments, [DepartmentRecord(name: "Office", function: "Operations")])
         XCTAssertEqual(state.canvasCurrentIDs, ["TASK-000001"])
         XCTAssertEqual(state.crumbs.first?.target, "TASK-000001")
         XCTAssertEqual(state.mementos.first?.target, "TASK-000001")
@@ -205,6 +209,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertTrue(item.isUnregistered)
         XCTAssertNil(item.flowID)
         XCTAssertEqual(item.priority, "")
+        XCTAssertNil(item.department, "Unregistered Inbox items must not receive an invented department.")
         XCTAssertEqual(try fixture.snapshot(), before)
     }
 
@@ -225,6 +230,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertEqual(item.flowID, "FLOW-000001")
         XCTAssertFalse(item.isUnregistered)
         XCTAssertEqual(item.priority, "High")
+        XCTAssertEqual(item.department, "Office")
     }
 
     func testMissingAndDuplicateInboxFlowReferencesRemainErrors() throws {
