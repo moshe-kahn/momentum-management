@@ -200,17 +200,18 @@ enum ProductionsDashboardPresentation {
         currentRowID: String?,
         section: ProductionsNavigationSection,
         state: ProductionsState,
-        departmentFilter: ProductionsDepartmentFilter = .all
+        departmentFilter: ProductionsDepartmentFilter = .all,
+        searchText: String = ""
     ) -> ProductionsSelection? {
-        let items = items(for: section, in: state, departmentFilter: departmentFilter)
+        let visibleItems = filteredItems(for: section, in: state, departmentFilter: departmentFilter, searchText: searchText)
         if let currentRowID,
-           let row = items.first(where: { $0.id == currentRowID && $0.targetID == currentTargetID }) {
+           let row = visibleItems.first(where: { $0.id == currentRowID && $0.targetID == currentTargetID }) {
             return ProductionsSelection(rowID: row.id, targetID: row.targetID)
         }
-        if let currentTargetID, let row = items.first(where: { $0.targetID == currentTargetID }) {
+        if let currentTargetID, let row = visibleItems.first(where: { $0.targetID == currentTargetID }) {
             return ProductionsSelection(rowID: row.id, targetID: row.targetID)
         }
-        guard let first = items.first else { return nil }
+        guard let first = visibleItems.first else { return nil }
         return ProductionsSelection(rowID: first.id, targetID: first.targetID)
     }
 

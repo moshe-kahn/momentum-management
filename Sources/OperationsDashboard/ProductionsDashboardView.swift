@@ -142,9 +142,9 @@ final class ProductionsDashboardViewModel: ObservableObject {
     var hasBlockingSettingsIssues: Bool { !blockingSettingsIssues.isEmpty }
     func preflightSelection() { settingsIssues = ProductionsLoader(reader: reader).load(configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: rootPath)).issues }
     func select(targetID: String?) { selectedID = targetID }
-    func reconcileSelection(for section: ProductionsNavigationSection, departmentFilter: ProductionsDepartmentFilter = .all, currentRowID: String? = nil) -> ProductionsSelection? {
+    func reconcileSelection(for section: ProductionsNavigationSection, departmentFilter: ProductionsDepartmentFilter = .all, searchText: String = "", currentRowID: String? = nil) -> ProductionsSelection? {
         guard let state else { selectedID = nil; return nil }
-        let selection = ProductionsDashboardPresentation.reconciledSelection(currentTargetID: selectedID, currentRowID: currentRowID, section: section, state: state, departmentFilter: departmentFilter)
+        let selection = ProductionsDashboardPresentation.reconciledSelection(currentTargetID: selectedID, currentRowID: currentRowID, section: section, state: state, departmentFilter: departmentFilter, searchText: searchText)
         selectedID = selection?.targetID
         return selection
     }
@@ -229,13 +229,13 @@ struct ProductionsDashboardView: View {
             reconcileSelection()
         }
         .onChange(of: departmentFilter) { _, _ in
-            searchText = ""
             reconcileSelection()
         }
+        .onChange(of: searchText) { _, _ in reconcileSelection() }
         .onChange(of: selectedRowID) { _, rowID in
             guard let state = model.state,
                   let rowID,
-                  let item = ProductionsDashboardPresentation.items(for: currentSection, in: state, departmentFilter: departmentFilter).first(where: { $0.id == rowID }) else { return }
+                  let item = ProductionsDashboardPresentation.filteredItems(for: currentSection, in: state, departmentFilter: departmentFilter, searchText: searchText).first(where: { $0.id == rowID }) else { return }
             model.select(targetID: item.targetID)
         }
         .onChange(of: model.state) { _, state in
@@ -363,7 +363,7 @@ struct ProductionsDashboardView: View {
     }
 
     private func reconcileSelection() {
-        let selection = model.reconcileSelection(for: currentSection, departmentFilter: departmentFilter, currentRowID: selectedRowID)
+        let selection = model.reconcileSelection(for: currentSection, departmentFilter: departmentFilter, searchText: searchText, currentRowID: selectedRowID)
         selectedRowID = selection?.rowID
     }
 }

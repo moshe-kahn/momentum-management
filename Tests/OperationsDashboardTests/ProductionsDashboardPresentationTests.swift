@@ -90,6 +90,72 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertNil(ProductionsDashboardPresentation.reconciledSelection(currentTargetID: task.targetID, currentRowID: task.id, section: .inbox, state: state, departmentFilter: studio))
     }
 
+    func testSearchReconciliationPreservesAStillVisibleSelection() throws {
+        let state = richState()
+        let idea = try XCTUnwrap(ProductionsDashboardPresentation.items(for: .workItems, in: state).last)
+
+        XCTAssertEqual(
+            ProductionsDashboardPresentation.reconciledSelection(currentTargetID: idea.targetID, currentRowID: idea.id, section: .workItems, state: state, searchText: "studio"),
+            ProductionsSelection(rowID: idea.id, targetID: idea.targetID)
+        )
+    }
+
+    func testSearchReconciliationFallsBackWhenCurrentSelectionIsHidden() throws {
+        let state = richState()
+        let items = ProductionsDashboardPresentation.items(for: .workItems, in: state)
+        let task = try XCTUnwrap(items.first)
+        let idea = try XCTUnwrap(items.last)
+
+        XCTAssertEqual(
+            ProductionsDashboardPresentation.reconciledSelection(currentTargetID: idea.targetID, currentRowID: idea.id, section: .workItems, state: state, searchText: "office"),
+            ProductionsSelection(rowID: task.id, targetID: task.targetID)
+        )
+    }
+
+    @MainActor
+    func testSearchWithNoMatchesClearsRowAndDetailSelection() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try fixture.snapshot()
+        let model = ProductionsDashboardViewModel(reader: LocalFileSystem(), initialConfiguration: fixture.configuration)
+        let state = try XCTUnwrap(model.state)
+        let task = try XCTUnwrap(ProductionsDashboardPresentation.items(for: .workItems, in: state).first)
+        model.select(targetID: task.targetID)
+
+        let selection = model.reconcileSelection(for: .workItems, searchText: "no visible match", currentRowID: task.id)
+
+        XCTAssertNil(selection, "The binding receives nil and clears selectedRowID.")
+        XCTAssertNil(model.selectedID, "Details must not retain a target hidden by search.")
+        XCTAssertEqual(try fixture.snapshot(), before)
+    }
+
+    func testClearingSearchRestoresAValidVisibleSelection() throws {
+        let state = richState()
+        let task = try XCTUnwrap(ProductionsDashboardPresentation.items(for: .workItems, in: state).first)
+        XCTAssertNil(ProductionsDashboardPresentation.reconciledSelection(currentTargetID: task.targetID, currentRowID: task.id, section: .workItems, state: state, searchText: "no visible match"))
+
+        XCTAssertEqual(
+            ProductionsDashboardPresentation.reconciledSelection(currentTargetID: nil, currentRowID: nil, section: .workItems, state: state, searchText: ""),
+            ProductionsSelection(rowID: task.id, targetID: task.targetID)
+        )
+    }
+
+    func testDepartmentAndSearchReconciliationCannotRetainHiddenDetail() throws {
+        let state = richState()
+        let officeTask = try XCTUnwrap(ProductionsDashboardPresentation.items(for: .workItems, in: state).first)
+        let studio = ProductionsDepartmentFilter(department: "Studio")
+
+        XCTAssertNil(
+            ProductionsDashboardPresentation.reconciledSelection(
+                currentTargetID: officeTask.targetID,
+                currentRowID: officeTask.id,
+                section: .workItems,
+                state: state,
+                departmentFilter: studio,
+                searchText: "office"
+            )
+        )
+    }
+
     func testSearchMatchesIdentityTitleStatusAndDepartmentWithoutReordering() {
         let state = richState()
         let all = ProductionsDashboardPresentation.items(for: .workItems, in: state)
