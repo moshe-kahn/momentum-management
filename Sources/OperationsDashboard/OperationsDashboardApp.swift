@@ -1,9 +1,13 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
 struct OperationsDashboardApp: App {
     init() {
+        if let exitCode = HeadlessCanvasCommandLine.runIfRequested() {
+            exit(exitCode)
+        }
         NSApplication.shared.setActivationPolicy(.regular)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
