@@ -5,7 +5,7 @@ import SwiftUI
 @main
 struct OperationsDashboardApp: App {
     init() {
-        if let exitCode = HeadlessCanvasCommandLine.runIfRequested() ?? HeadlessMementoCommandLine.runIfRequested() {
+        if let exitCode = HeadlessCanvasCommandLine.runIfRequested() ?? HeadlessMementoCommandLine.runIfRequested() ?? HeadlessFlowCommandLine.runIfRequested() {
             exit(exitCode)
         }
         NSApplication.shared.setActivationPolicy(.regular)

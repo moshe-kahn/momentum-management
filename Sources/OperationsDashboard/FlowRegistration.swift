@@ -52,8 +52,20 @@ struct FlowRegistrationPreview: Equatable {
     let flowID: String
     let row: String
     let payloadPath: String
+    let payloadState: FlowRegistrationPayloadState
     let ledgerHash: String
     let flowHash: String
+}
+
+/// Exact lstat snapshot of the Inbox payload that a Flow preview selected.
+/// Commit must revalidate it under the transaction lock before issuing an ID.
+struct FlowRegistrationPayloadState: Codable, Equatable {
+    let mode: UInt32
+    let device: UInt64
+    let inode: UInt64
+    let size: Int64
+    let modifiedSeconds: Int64
+    let modifiedNanoseconds: Int64
 }
 
 protocol FlowRegistrationJournalStore {
@@ -181,17 +193,18 @@ struct FlowRegistrationService {
         try validate(metadata)
         let paths = Paths(configuration)
         let payloadPath = try eligiblePayload(payload, paths: paths)
+        let payloadState = try payloadState(at: paths.root.appending(path: payloadPath))
         let ledger = try Data(contentsOf: paths.ledger)
         let flow = try Data(contentsOf: paths.flow)
         guard !flowReferences(payloadPath, in: String(decoding: flow, as: UTF8.self)) else { throw FlowRegistrationError.conflict("The Inbox payload is already registered.") }
         let id = try nextFlowID(in: String(decoding: ledger, as: UTF8.self))
         let row = try makeRow(id: id, payloadPath: payloadPath, metadata: metadata, timestamp: now())
         try validateFlowReplacement(try append(row: row, to: String(decoding: flow, as: UTF8.self)), appendedRow: row)
-        return FlowRegistrationPreview(flowID: id, row: row, payloadPath: payloadPath, ledgerHash: hash(ledger), flowHash: hash(flow))
+        return FlowRegistrationPreview(flowID: id, row: row, payloadPath: payloadPath, payloadState: payloadState, ledgerHash: hash(ledger), flowHash: hash(flow))
     }
 
     /// Must be called only after the exact preview has received final user confirmation.
-    func commit(configuration: ProductionsConfiguration, payload: FlowItem, metadata: FlowRegistrationMetadata, preview: FlowRegistrationPreview, reload: (ProductionsConfiguration) -> ProductionsState) throws {
+    func commit(configuration: ProductionsConfiguration, payload: FlowItem, metadata: FlowRegistrationMetadata, preview: FlowRegistrationPreview, expectedPayloadState: FlowRegistrationPayloadState, reload: (ProductionsConfiguration) -> ProductionsState) throws {
         try validate(metadata)
         let paths = Paths(configuration)
         guard let lock = locking.acquire(ledgerURL: paths.ledger) else { throw FlowRegistrationError.lockUnavailable }
@@ -200,6 +213,10 @@ struct FlowRegistrationService {
         do {
                 let payloadPath = try eligiblePayload(payload, paths: paths)
                 guard payloadPath == preview.payloadPath else { throw FlowRegistrationError.conflict("The selected Inbox payload changed.") }
+                guard expectedPayloadState == preview.payloadState,
+                      try payloadState(at: paths.root.appending(path: payloadPath)) == expectedPayloadState else {
+                    throw FlowRegistrationError.conflict("The selected Inbox payload filesystem state changed since preview.")
+                }
                 let ledger = try Data(contentsOf: paths.ledger)
                 let flow = try Data(contentsOf: paths.flow)
                 guard hash(ledger) == preview.ledgerHash, hash(flow) == preview.flowHash else {
@@ -272,6 +289,12 @@ struct FlowRegistrationService {
         guard lstat(url.path, &status) == 0 else { throw FlowRegistrationError.ineligible("Inbox payload no longer exists.") }
         guard (status.st_mode & S_IFMT) != S_IFLNK else { throw FlowRegistrationError.ineligible("Inbox symlinks cannot be registered.") }
         return payload.location
+    }
+
+    private func payloadState(at url: URL) throws -> FlowRegistrationPayloadState {
+        var status = stat()
+        guard lstat(url.path, &status) == 0 else { throw FlowRegistrationError.ineligible("Inbox payload no longer exists.") }
+        return FlowRegistrationPayloadState(mode: UInt32(status.st_mode), device: UInt64(status.st_dev), inode: UInt64(status.st_ino), size: Int64(status.st_size), modifiedSeconds: Int64(status.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(status.st_mtimespec.tv_nsec))
     }
 
     private func validate(_ metadata: FlowRegistrationMetadata) throws {

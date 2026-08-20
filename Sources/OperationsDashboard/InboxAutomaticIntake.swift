@@ -65,7 +65,7 @@ final class InboxAutomaticIntake {
             do {
                 let metadata = try registration.automaticDefaults(configuration: configuration, payload: payload)
                 let preview = try registration.preview(configuration: configuration, payload: payload, metadata: metadata)
-                try registration.commit(configuration: configuration, payload: payload, metadata: metadata, preview: preview, reload: reload)
+                try registration.commit(configuration: configuration, payload: payload, metadata: metadata, preview: preview, expectedPayloadState: preview.payloadState, reload: reload)
                 observations.removeValue(forKey: payload.location)
                 results.append(InboxIntakeResult(payloadPath: payload.location, outcome: .registered(preview.flowID), reason: "Registered automatically."))
             } catch let error as FlowRegistrationError {
