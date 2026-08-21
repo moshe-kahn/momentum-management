@@ -42,7 +42,8 @@ enum HeadlessCaptureCommandLine {
     static let verificationFailureExitCode: Int32 = 3
 
     static func runIfRequested(arguments: [String] = CommandLine.arguments, adapter: HeadlessCaptureCommandAdapter = HeadlessCaptureCommandAdapter(), write: (String) -> Void = { print($0) }) -> Int32? {
-        let values = Array(arguments.dropFirst()); guard values.first == "capture" else { return nil }
+        let values = Array(arguments.dropFirst())
+        guard values.first == "capture" else { return nil }
         do {
             let (previewMode, command, configuration) = try parse(values)
             if previewMode {

@@ -52,10 +52,11 @@ struct ProductionsInboxCaptureService {
     private let now: () -> Date
     private let typedNoteWriter: (Data, URL) throws -> Void
     private let typedNoteVerifier: (Data, URL) throws -> Void
+    let captureFileCloneRuntime: CaptureFileCloneRuntime
     private var observations: [String: Observation] = [:]
 
-    init(manager: FileManager = .default, now: @escaping () -> Date = Date.init, typedNoteWriter: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.atomicCreate, typedNoteVerifier: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.verify) {
-        self.manager = manager; self.now = now; self.typedNoteWriter = typedNoteWriter; self.typedNoteVerifier = typedNoteVerifier
+    init(manager: FileManager = .default, now: @escaping () -> Date = Date.init, typedNoteWriter: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.atomicCreate, typedNoteVerifier: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.verify, captureFileCloneRuntime: CaptureFileCloneRuntime = .live) {
+        self.manager = manager; self.now = now; self.typedNoteWriter = typedNoteWriter; self.typedNoteVerifier = typedNoteVerifier; self.captureFileCloneRuntime = captureFileCloneRuntime
     }
 
     mutating func copyManual(source: URL, productionsRoot: URL) -> ProductionsInboxCaptureOutcome {
