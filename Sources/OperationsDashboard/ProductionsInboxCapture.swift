@@ -53,10 +53,11 @@ struct ProductionsInboxCaptureService {
     private let typedNoteWriter: (Data, URL) throws -> Void
     private let typedNoteVerifier: (Data, URL) throws -> Void
     let captureFileCloneRuntime: CaptureFileCloneRuntime
+    let automaticCaptureContext: AutomaticCaptureContext
     private var observations: [String: Observation] = [:]
 
-    init(manager: FileManager = .default, now: @escaping () -> Date = Date.init, typedNoteWriter: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.atomicCreate, typedNoteVerifier: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.verify, captureFileCloneRuntime: CaptureFileCloneRuntime = .live) {
-        self.manager = manager; self.now = now; self.typedNoteWriter = typedNoteWriter; self.typedNoteVerifier = typedNoteVerifier; self.captureFileCloneRuntime = captureFileCloneRuntime
+    init(manager: FileManager = .default, now: @escaping () -> Date = Date.init, typedNoteWriter: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.atomicCreate, typedNoteVerifier: @escaping (Data, URL) throws -> Void = ProductionsInboxCaptureService.verify, captureFileCloneRuntime: CaptureFileCloneRuntime = .live, automaticCaptureContext: AutomaticCaptureContext = .live) {
+        self.manager = manager; self.now = now; self.typedNoteWriter = typedNoteWriter; self.typedNoteVerifier = typedNoteVerifier; self.captureFileCloneRuntime = captureFileCloneRuntime; self.automaticCaptureContext = automaticCaptureContext
     }
 
     mutating func copyManual(source: URL, productionsRoot: URL) -> ProductionsInboxCaptureOutcome {
@@ -182,9 +183,9 @@ final class ProductionsAutomaticCaptureMonitor: ObservableObject {
     private var rootPath = ""
     private let storage: UserDefaults
     private let pollInterval: Duration
-    static let sourceKey = "operations-dashboard.capture.automatic-source"
+    static let sourceKey = AutomaticCaptureContext.preferencesSourceKey
 
-    init(storage: UserDefaults = .standard, pollInterval: Duration = .seconds(2), service: ProductionsInboxCaptureService = ProductionsInboxCaptureService()) {
+    init(storage: UserDefaults = UserDefaults(suiteName: AutomaticCaptureContext.preferencesSuiteName)!, pollInterval: Duration = .seconds(2), service: ProductionsInboxCaptureService = ProductionsInboxCaptureService()) {
         self.storage = storage; self.pollInterval = pollInterval; self.service = service
         sourcePath = storage.string(forKey: Self.sourceKey) ?? ""
     }
