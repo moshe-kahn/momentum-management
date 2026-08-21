@@ -133,7 +133,17 @@ enum HeadlessCanvasCommandLine {
                 case let .startCanvasCommittedPackageFailed(diagnostic): write(diagnostic); return partialSuccessExitCode
                 }
             }
-        } catch { write(error.localizedDescription); return 2 }
+        } catch let error as CanvasWorkTransactionError {
+            if case let .reloadFailed(diagnostic) = error {
+                write("Canvas mutation is committed, but canonical reload or verification failed. Do not retry automatically. Service diagnostic: \(diagnostic)")
+                return partialSuccessExitCode
+            }
+            write(error.localizedDescription)
+            return 2
+        } catch {
+            write(error.localizedDescription)
+            return 2
+        }
     }
 
     static func parse(_ arguments: [String]) throws -> HeadlessCanvasInvocation {

@@ -113,8 +113,52 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
         let partialAdapter = HeadlessCanvasCommandAdapter(canvas: CanvasWorkTransactionService(journalStore: CommandJournal(), now: { self.date }), recommendedModel: "")
         var output: [String] = []
         let exitCode = HeadlessCanvasCommandLine.runIfRequested(arguments: arguments(for: command, root: fixture.root.path, confirmation: try XCTUnwrap(command.confirmation).confirmation), adapter: partialAdapter, write: { output.append($0) })
-        XCTAssertEqual(exitCode, HeadlessCanvasCommandLine.partialSuccessExitCode)
+        XCTAssertEqual(exitCode, 3)
         XCTAssertTrue(output.joined().contains("Canvas must not be retried"))
+    }
+
+    func testCommittedReloadFailureUsesLiteralExitThreeAndNoRetryDiagnostic() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let reader = CommandCanvasReloadFailingReader()
+        let service = CanvasWorkTransactionService(
+            journalStore: CommandJournal(),
+            replacer: CommandCanvasReloadFailingReplacer(reader: reader),
+            now: { self.date }
+        )
+        let failingAdapter = HeadlessCanvasCommandAdapter(canvas: service, reader: reader)
+        let draft = command(.stop)
+        let token = try ConfirmedCommand.token(preview: failingAdapter.preview(for: draft, configuration: configuration(fixture)))
+        var output: [String] = []
+
+        let exitCode = HeadlessCanvasCommandLine.runIfRequested(
+            arguments: arguments(for: draft, root: fixture.root.path, confirmation: token),
+            adapter: failingAdapter,
+            write: { output.append($0) }
+        )
+
+        XCTAssertEqual(exitCode, 3)
+        let diagnostic = output.joined(separator: "\n")
+        XCTAssertTrue(diagnostic.contains("Canvas mutation is committed"), diagnostic)
+        XCTAssertTrue(diagnostic.contains("canonical reload or verification failed"), diagnostic)
+        XCTAssertTrue(diagnostic.contains("Do not retry automatically."), diagnostic)
+    }
+
+    func testDefinitePremutationLockFailureRetainsLiteralExitTwo() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let denied = CanvasWorkTransactionService(journalStore: CommandJournal(), locking: CommandDeniedLock(), now: { self.date })
+        let deniedAdapter = adapter(service: denied)
+        let draft = command(.start)
+        let token = try ConfirmedCommand.token(preview: deniedAdapter.preview(for: draft, configuration: configuration(fixture)))
+        var output: [String] = []
+
+        let exitCode = HeadlessCanvasCommandLine.runIfRequested(
+            arguments: arguments(for: draft, root: fixture.root.path, confirmation: token),
+            adapter: deniedAdapter,
+            write: { output.append($0) }
+        )
+
+        XCTAssertEqual(exitCode, 2)
+        XCTAssertEqual(output, ["Another Canvas write transaction is in progress."])
     }
 
     func testPreviewOutputIncludesConfirmationTokenAndNoArgumentLaunchIsUntouched() throws {
@@ -146,3 +190,24 @@ private final class CommandJournal: CanvasWorkTransactionJournalStore {
 }
 private struct CommandDeniedLock: CanvasWorkTransactionLocking { func acquire(canvasURL: URL) -> AnyObject? { nil } }
 private struct CommandFailingReplacer: AtomicFileReplacing { func replace(data: Data, at target: URL) throws { throw NSError(domain: "HeadlessCanvasCommandsTests", code: 2) } }
+private final class CommandCanvasReloadFailingReader: ProductionsReading {
+    var failCanvas = false
+    private let local = LocalFileSystem()
+    func exists(at url: URL) -> Bool { local.exists(at: url) }
+    func isReadable(at url: URL) -> Bool { local.isReadable(at: url) }
+    func isSymbolicLink(at url: URL) throws -> Bool { try local.isSymbolicLink(at: url) }
+    func isDirectory(at url: URL) throws -> Bool { try local.isDirectory(at: url) }
+    func directoryEntries(at url: URL) throws -> [FileSystemEntry] { try local.directoryEntries(at: url) }
+    func readData(at url: URL) throws -> Data {
+        failCanvas && url.path.hasSuffix("/Office/Threads/Canvas.md") ? Data("| malformed |".utf8) : try local.readData(at: url)
+    }
+}
+private final class CommandCanvasReloadFailingReplacer: AtomicFileReplacing {
+    private let durable = DurableReplacement()
+    private let reader: CommandCanvasReloadFailingReader
+    init(reader: CommandCanvasReloadFailingReader) { self.reader = reader }
+    func replace(data: Data, at target: URL) throws {
+        try durable.replace(data: data, at: target)
+        reader.failCanvas = true
+    }
+}

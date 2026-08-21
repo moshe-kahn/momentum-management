@@ -76,6 +76,47 @@ final class HeadlessMementoCommandsTests: XCTestCase {
         XCTAssertTrue(output.joined().contains("Memento create committed for TASK-000001: MEM-000002."))
     }
 
+    func testUnsafeServiceOutcomesUseLiteralExitThreeAndStateSpecificNoRetryDiagnostics() throws {
+        try assertUnsafeCommandOutcome(
+            service: MementoTransactionService(journalStore: MementoCommandJournal(), replacer: MementoCommandFailOnCallsReplacer(failOn: [2]), now: { self.date }),
+            contains: "Memento replacement failed after mutation began"
+        )
+        try assertUnsafeCommandOutcome(
+            service: MementoTransactionService(journalStore: MementoCommandJournal(), replacer: MementoCommandFailOnCallsReplacer(failOn: [1, 4]), now: { self.date }),
+            contains: "Memento transaction requires explicit recovery"
+        )
+
+        let fixture = try cleanFixture(); defer { fixture.remove() }
+        let reloadService = MementoTransactionService(
+            journalStore: MementoCommandJournal(),
+            replacer: MementoCommandReloadFailingReplacer { fixture.replaceMementos("| malformed |") },
+            now: { self.date }
+        )
+        try assertUnsafeCommandOutcome(
+            service: reloadService,
+            fixture: fixture,
+            contains: "Memento mutation reached reload or verification after mutation"
+        )
+    }
+
+    func testDefinitePremutationLockFailureRetainsLiteralExitTwo() throws {
+        let fixture = try cleanFixture(); defer { fixture.remove() }
+        let denied = MementoTransactionService(journalStore: MementoCommandJournal(), locking: MementoCommandDeniedLock(), now: { self.date })
+        let deniedAdapter = adapter(service: denied)
+        let value = command(.create)
+        let token = try deniedAdapter.preview(for: value, configuration: fixture.configuration).confirmationToken()
+        var output: [String] = []
+
+        let exitCode = HeadlessMementoCommandLine.runIfRequested(
+            arguments: arguments(for: value, root: fixture.root.path, confirmation: token),
+            adapter: deniedAdapter,
+            write: { output.append($0) }
+        )
+
+        XCTAssertEqual(exitCode, 2)
+        XCTAssertEqual(output, ["Another Memento or identifier transaction is in progress."])
+    }
+
     func testNoArgumentLeavesGUIRoutingUntouched() {
         XCTAssertNil(HeadlessMementoCommandLine.runIfRequested(arguments: ["OperationsDashboard"]))
     }
@@ -94,6 +135,31 @@ final class HeadlessMementoCommandsTests: XCTestCase {
         if let confirmation { values += ["--confirm", confirmation] }
         return values
     }
+
+    private func assertUnsafeCommandOutcome(
+        service: MementoTransactionService,
+        fixture suppliedFixture: SyntheticProductionsFixture? = nil,
+        contains expectedDiagnostic: String
+    ) throws {
+        let ownsFixture = suppliedFixture == nil
+        let fixture = try suppliedFixture ?? cleanFixture()
+        defer { if ownsFixture { fixture.remove() } }
+        let failingAdapter = adapter(service: service)
+        let value = command(.create)
+        let token = try failingAdapter.preview(for: value, configuration: fixture.configuration).confirmationToken()
+        var output: [String] = []
+
+        let exitCode = HeadlessMementoCommandLine.runIfRequested(
+            arguments: arguments(for: value, root: fixture.root.path, confirmation: token),
+            adapter: failingAdapter,
+            write: { output.append($0) }
+        )
+
+        XCTAssertEqual(exitCode, 3)
+        let diagnostic = output.joined(separator: "\n")
+        XCTAssertTrue(diagnostic.contains(expectedDiagnostic), diagnostic)
+        XCTAssertTrue(diagnostic.contains("Do not retry automatically."), diagnostic)
+    }
 }
 
 private final class MementoCommandJournal: MementoTransactionJournalStore {
@@ -102,3 +168,25 @@ private final class MementoCommandJournal: MementoTransactionJournalStore {
     func incomplete() throws -> [MementoTransactionJournal] { [] }
 }
 private struct MementoCommandDeniedLock: MementoTransactionLocking { func acquire(ledgerURL: URL) -> AnyObject? { nil } }
+private final class MementoCommandFailOnCallsReplacer: AtomicFileReplacing {
+    private var count = 0
+    private let failures: Set<Int>
+    private let durable = DurableReplacement()
+    init(failOn: Set<Int>) { failures = failOn }
+    func replace(data: Data, at target: URL) throws {
+        count += 1
+        if failures.contains(count) { throw NSError(domain: "HeadlessMementoCommandsTests", code: count) }
+        try durable.replace(data: data, at: target)
+    }
+}
+private final class MementoCommandReloadFailingReplacer: AtomicFileReplacing {
+    private var count = 0
+    private let durable = DurableReplacement()
+    private let failReload: () -> Void
+    init(failReload: @escaping () -> Void) { self.failReload = failReload }
+    func replace(data: Data, at target: URL) throws {
+        count += 1
+        try durable.replace(data: data, at: target)
+        if count == 4 { failReload() }
+    }
+}

@@ -99,6 +99,8 @@ struct HeadlessMementoCommandAdapter {
 }
 
 enum HeadlessMementoCommandLine {
+    static let uncertainExitCode: Int32 = 3
+
     static func runIfRequested(arguments: [String] = CommandLine.arguments, adapter: HeadlessMementoCommandAdapter = HeadlessMementoCommandAdapter(), write: (String) -> Void = { print($0) }) -> Int32? {
         let values = Array(arguments.dropFirst()); guard values.first == "memento" else { return nil }
         do {
@@ -111,7 +113,25 @@ enum HeadlessMementoCommandLine {
             }
             else { let result = try adapter.execute(command, configuration: configuration); write("Memento \(result.action.rawValue) committed for \(result.targetID): \(result.mementoID).") }
             return 0
-        } catch { write(error.localizedDescription); return 2 }
+        } catch let error as MementoTransactionError {
+            switch error {
+            case let .replacementFailed(diagnostic):
+                write("Memento replacement failed after mutation began; canonical state requires inspection. Do not retry automatically. Service diagnostic: \(diagnostic)")
+                return uncertainExitCode
+            case let .recoveryRequired(diagnostic):
+                write("Memento transaction requires explicit recovery; canonical state may be partial or uncertain. Do not retry automatically. Service diagnostic: \(diagnostic)")
+                return uncertainExitCode
+            case let .reloadFailed(diagnostic):
+                write("Memento mutation reached reload or verification after mutation; final canonical state requires inspection. Do not retry automatically. Service diagnostic: \(diagnostic)")
+                return uncertainExitCode
+            default:
+                write(error.localizedDescription)
+                return 2
+            }
+        } catch {
+            write(error.localizedDescription)
+            return 2
+        }
     }
 
     private static func parse(_ arguments: [String]) throws -> (Bool, MementoCommand, ProductionsConfiguration) {
