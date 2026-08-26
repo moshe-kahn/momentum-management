@@ -39,6 +39,32 @@ final class SessionPreparationTests: XCTestCase {
         XCTAssertTrue(String(decoding: try fixture.data(at: "Warehouse/Reference/Identifier Ledger.md"), as: UTF8.self).contains("MEM-000002"))
     }
 
+    func testStartAndResumePackagesIncludeStableAdministrativeHandoffBoundary() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let resume = try renderer().prepare(state: fixture.load(), workID: "TASK-000001", recommendedModel: "Codex", reasoningLevel: "high")
+        try fixture.add(try WorkspaceSectionEditing.removeCurrentMemento(from: fixture.workspaceRecord), at: "Workspace/TASK-000001/TASK-000001.md")
+        fixture.replaceMementos(emptyMementos)
+        let start = try renderer().prepare(state: fixture.load(), workID: "TASK-000001", recommendedModel: "Codex", reasoningLevel: "high")
+
+        for package in [resume, start] {
+            let handoff = package.context.stoppingAndHandoffRequirements
+            XCTAssertTrue(handoff.contains("do not improvise canonical Productions administration"))
+            XCTAssertTrue(handoff.contains("requested operation"))
+            XCTAssertTrue(handoff.contains("proposed durable target"))
+            XCTAssertTrue(handoff.contains("explicit statement that the thought is untargeted"))
+            XCTAssertTrue(handoff.contains("concise title or summary"))
+            XCTAssertTrue(handoff.contains("proposed Crumb kind and priority when applicable"))
+            XCTAssertTrue(handoff.contains("current validated task and repository state"))
+            XCTAssertTrue(handoff.contains("source or evidence location"))
+            XCTAssertTrue(handoff.contains("exact continuation or next-action implication"))
+            XCTAssertTrue(handoff.contains("explicit boundaries on what was not authorized or performed"))
+            XCTAssertTrue(handoff.contains("Quick Capture into `Office/Inbox/`"))
+            XCTAssertTrue(handoff.contains("capture creates an unregistered payload only"))
+            XCTAssertTrue(handoff.contains("`/Users/kahntra/Productions/PRODUCTIONS_OFFICE_ADMINISTRATOR.md`"))
+            XCTAssertTrue(package.contextText.contains("## Stopping and handoff requirements"))
+        }
+    }
+
     func testCopyWritesOnlyDisplayedPackageAndLeavesProductionsUnchanged() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         let pasteboard = RecordingPasteboard(), service = SessionPreparationService(renderer: renderer(), pasteboard: pasteboard)

@@ -172,6 +172,9 @@ struct SessionPackageRenderer {
         let capturedState = markMutable(memento?.currentState ?? lastValidated)
         let capturedNext = markMutable(memento?.naturalResumePoint ?? next)
         let stop = "Stop when the required outcome is verified, a canonical conflict is found, or further work needs new authority; leave an explicit handoff."
+        let administrativeHandoff = """
+        Administrative handoff boundary: Product and repository sessions do not improvise canonical Productions administration. Return an administrative request to the Productions Office Administrator as a structured handoff containing the requested operation; proposed durable target or an explicit statement that the thought is untargeted; concise title or summary; proposed Crumb kind and priority when applicable; current validated task and repository state; source or evidence location; exact continuation or next-action implication; and explicit boundaries on what was not authorized or performed. For a stray untargeted thought, use Quick Capture into `Office/Inbox/`; capture creates an unregistered payload only and does not approve, classify, register, or start work. Persistent administrator authority is defined at `/Users/kahntra/Productions/PRODUCTIONS_OFFICE_ADMINISTRATOR.md`; product sessions do not gain that authority and need not rediscover the charter through repository instructions merely to return a handoff.
+        """
         let relationships = "Dependencies: \(list(subject.dependencies)). Relationships: \(list(subject.related)). Product: \(value(subject.product, fallback: "—"))."
         let sourceReferences = snapshot.files.map { "`\($0.path)` SHA-256 \($0.sha256)" }.joined(separator: "\n")
         let authority = "Authorization is ephemeral \(authorization.rawValue). Registry lifecycle, Workspace boundaries, and narrower canonical restrictions remain authoritative and are not modified by this package."
@@ -199,7 +202,7 @@ struct SessionPackageRenderer {
             planAndRelevantLocations: "Plan and steps:\n\(plan)\nRelevant locations:\n\(locations)",
             executionInstructions: "Begin at: \(capturedNext)\nRevalidate every item marked Captured before relying on it. Preserve unknown canonical content and remain within \(authorization.rawValue) authority.",
             verificationRequirements: verification,
-            stoppingAndHandoffRequirements: stop,
+            stoppingAndHandoffRequirements: "\(stop)\n\n\(administrativeHandoff)",
             canonicalSourceReferences: sourceReferences
         )
         return SessionPackage(schemaVersion: SessionPackage.currentSchemaVersion, preparedAt: now(), sourceSnapshot: snapshot, brief: brief, context: context)
