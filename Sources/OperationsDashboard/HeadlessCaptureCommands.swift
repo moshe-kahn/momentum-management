@@ -20,15 +20,32 @@ struct HeadlessCaptureCommandAdapter {
     init(makeService: @escaping () -> ProductionsInboxCaptureService = { ProductionsInboxCaptureService() }) { self.makeService = makeService }
 
     func preview(for command: CaptureNoteCommand, configuration: ProductionsConfiguration) throws -> TypedNoteCapturePreview {
-        try makeService().previewTypedNote(text: command.text, productionsRoot: configuration.rootURL, timestamp: command.timestamp)
+        try makeService().previewTypedNote(text: command.text, productionsRoot: rawRoot(configuration), timestamp: command.timestamp)
     }
 
     func execute(_ command: CaptureNoteCommand, configuration: ProductionsConfiguration) throws -> URL {
+        let current = try confirmedPreview(command, configuration: configuration)
+        guard !current.requiresRecovery else { throw TypedNoteCaptureError.recoveryRequired("Temporary Quick Capture residue requires the recovery-aware command path. No cleanup or publication was attempted.") }
+        return try makeService().commitTypedNote(text: command.text, productionsRoot: rawRoot(configuration), timestamp: command.timestamp, preview: current)
+    }
+
+    func executeConfirmed(_ command: CaptureNoteCommand, configuration: ProductionsConfiguration) throws -> TypedNoteCommandExecutionOutcome {
+        let current = try confirmedPreview(command, configuration: configuration)
+        let service = makeService()
+        if current.requiresRecovery {
+            return .recovered(try service.recoverTypedNoteResidue(text: command.text, productionsRoot: rawRoot(configuration), timestamp: command.timestamp, preview: current))
+        }
+        return .captured(try service.commitTypedNote(text: command.text, productionsRoot: rawRoot(configuration), timestamp: command.timestamp, preview: current))
+    }
+
+    private func confirmedPreview(_ command: CaptureNoteCommand, configuration: ProductionsConfiguration) throws -> TypedNoteCapturePreview {
         let current = try preview(for: command, configuration: configuration)
         guard let confirmation = command.confirmation else { throw HeadlessCaptureCommandError.confirmationRequired("Run capture note preview and supply its confirmation token with --confirm.") }
         guard confirmation == (try current.confirmationToken()) else { throw HeadlessCaptureCommandError.confirmationRequired("The command no longer matches its preview. Re-run capture note preview and use its new confirmation token.") }
-        return try makeService().commitTypedNote(text: command.text, productionsRoot: configuration.rootURL, timestamp: command.timestamp, preview: current)
+        return current
     }
+
+    private func rawRoot(_ configuration: ProductionsConfiguration) -> URL { URL(fileURLWithPath: configuration.productionsRootPath, isDirectory: true) }
 }
 
 extension TypedNoteCapturePreview {
@@ -47,19 +64,23 @@ enum HeadlessCaptureCommandLine {
         do {
             let (previewMode, command, configuration) = try parse(values)
             if previewMode {
-                struct Output: Codable { let preview: TypedNoteCapturePreview; let confirmationToken: String }
+                struct Output: Codable { let preview: TypedNoteCaptureRedactedPreview; let confirmationToken: String }
                 let preview = try adapter.preview(for: command, configuration: configuration)
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-                write(String(decoding: try encoder.encode(Output(preview: preview, confirmationToken: try preview.confirmationToken())), as: UTF8.self))
+                write(String(decoding: try encoder.encode(Output(preview: .init(preview), confirmationToken: try preview.confirmationToken())), as: UTF8.self))
             } else {
-                let destination = try adapter.execute(command, configuration: configuration)
-                write("Quick Capture committed to \(destination.path).")
+                switch try adapter.executeConfirmed(command, configuration: configuration) {
+                case let .captured(destination):
+                    write("Quick Capture committed to \(destination.path). No identifier was issued; the payload is Unregistered and awaits Office processing.")
+                case let .recovered(recovery):
+                    write("Quick Capture recovery \(recovery.operationFingerprint) quarantined \(recovery.removedOperationFingerprints.count) stale temporary operation(s) without deletion as \(recovery.quarantineNames.joined(separator: ", ")). No payload was published. Re-run preview before capture.")
+                }
             }
             return 0
         } catch let error as TypedNoteCaptureError {
             switch error {
-            case let .verificationFailed(diagnostic):
-                write("Quick Capture was created; only post-write verification failed. Do not retry automatically. Service diagnostic: \(diagnostic)")
+            case let .verificationFailed(diagnostic), let .namespaceUncertain(diagnostic), let .recoveryRequired(diagnostic):
+                write(diagnostic)
                 return verificationFailureExitCode
             default: write(error.localizedDescription); return 2
             }

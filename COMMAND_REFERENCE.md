@@ -124,7 +124,35 @@ Execute:
 OperationsDashboard capture note --productions-root <path> --text <note> --occurred-at <ISO-8601> --confirm <preview-token>
 ```
 
-The timestamp and note text are confirmation-bound. Exit 3 means the note was created but post-write verification failed. Do not retry automatically.
+Capture note accepts untargeted nonblank text and never requires a Task or
+other durable target. The timestamp, note text, configured root, exact Inbox
+destination, content hash, destination absence, and Inbox directory identity
+are confirmation-bound. Preview JSON is deliberately redacted: it reports the
+content hash, byte count, timestamp, destination path and identity, operation
+fingerprint, recovery state, and confirmation token, but never the note or
+rendered Markdown body. Publication opens every configured namespace component
+without following symbolic links, writes and syncs a hidden same-directory
+operation file, revalidates the live Office/Inbox identity, then publishes the
+exact filename exclusively. Success creates one Unregistered Inbox payload
+only: it issues no identifier, creates no Flow row or Crumb, and infers no
+classification, priority, lifecycle, approval, relationship, or Canvas state.
+The textual success response states that the payload is Unregistered and awaits
+Office processing.
+
+A repeated or concurrent submission never overwrites or silently renames a
+payload. A live cooperating operation is reported as active concurrency.
+Process interruption can leave a `.capture-note-*` operation file: a fresh
+preview reports only its operation fingerprint, and the matching confirmed
+execution exclusively moves the exact confirmed inode to an operation-owned
+`.quick-capture-quarantine-*` name without deletion, publishes nothing, and
+requires a new preview before capture. A raced-in replacement is restored or
+preserved for manual recovery and never deleted. Unsafe residue, quarantine
+failure, or uncertain replacement is an explicit exit-3 recovery condition and
+is never silently removed or retried. Exit 3 identifies the exact
+published destination only while the configured Inbox identity is still
+confirmed; if that identity changed, it reports the opened identity and
+operation fingerprint with no reliable pathname. Inspect the stated operation
+and do not retry automatically.
 
 ## Capture copy: regular files only
 
