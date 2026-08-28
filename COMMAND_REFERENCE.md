@@ -21,6 +21,41 @@ Confirmation tokens are state-bound, not reusable approvals. A changed source, d
 
 ## Canvas
 
+### Ordinary desired-state Focus and Clear (adopted)
+
+The repository implements a compact one-action ordinary-attention surface:
+
+```text
+OperationsDashboard canvas focus --productions-root <path> --work <ID> --reason <text> --context <text>
+OperationsDashboard canvas clear --productions-root <path> --work <ID> --reason <text> --context <text>
+OperationsDashboard canvas inspect --productions-root <path> --operation <UUID>
+```
+
+`focus` appends `Placed` and `Engaged` only when the target is off Canvas. If
+the target is already current, it succeeds as an explicit no-op. `clear`
+appends `Cleared` only when the target is current and otherwise succeeds as an
+explicit no-op. Both actions wait through at most four nonblocking lock
+attempts with 150 milliseconds between attempts, retain a unique operation
+identity and operation journal, and reconcile an interrupted response only
+when the exact journal-bound event sequence is present and that operation's
+boundary remains current. Membership alone, partial Focus, and independently
+produced matching state do not prove success. Historical commit evidence is
+reported separately when a later boundary supersedes the operation. Before a
+no-op or mutation, the complete requested-target transition history is
+validated. They never render a session package. Normal output is one compact
+sentence containing the discoverable operation ID; `canvas inspect` exposes
+hashes, intended events, terminal state, historical evidence, current-boundary
+proof, and reconciliation diagnostics without mutating Productions.
+
+This surface is adopted for live ordinary Productions attention by Momentum
+Management Filesystem Contract (DOC-0016) version 1.11. The independently
+accepted root `AGENTS.md` correction likewise directs routine task-execution
+attention to `canvas focus` and `canvas clear`, while retaining
+preview-confirmed low-level Start and Stop for explicitly sensitive or manual
+compatibility workflows.
+
+### Preview-confirmed low-level Start and Stop
+
 Preview either action:
 
 ```text
@@ -34,6 +69,10 @@ OperationsDashboard canvas <start|stop> --productions-root <path> --work <ID> --
 ```
 
 `start` prints the prepared session package as canonical JSON. `stop` prints the committed Canvas events. If a Canvas mutation commits but canonical reload or verification fails, or if Canvas start commits but later session-package preparation fails, the command returns exit 3: Canvas has changed and the action must not be retried automatically.
+
+These commands retain their original confirmation-bound behavior for
+compatibility and explicitly sensitive or manual workflows. Ordinary focus and
+clear do not replace or reinterpret their preview tokens.
 
 ## Memento
 
@@ -145,6 +184,44 @@ Execution durably claims the receipt before the first move. Receipts cannot be c
 | `3` | Mutation committed, partially committed, or may have committed; verification, reload, journaling, or later work failed. | Do not retry automatically. Inspect the diagnostic and canonical state, then recover manually. |
 
 Not every command emits every code. Canvas, Memento, Flow, capture-note, capture-copy, and automatic capture emit `3` for their documented committed, partial, recovery-required, or uncertain outcomes. Exit `2` is not a blanket statement that an unchanged retry is appropriate.
+
+For ordinary Canvas focus/clear, exit `2` is a definite pre-mutation failure
+or exhausted pre-mutation lock wait. Exit `3` includes the operation identity
+needed to inspect the recovery journal and canonical Canvas without blindly
+duplicating events.
+
+A definite-no-commit replacement failure also returns exit `2`, names the
+operation UUID, and directs the operator to `canvas inspect`. Failure to write
+the correct terminal journal state after a proven commit returns exit `3`,
+names the UUID, reports exactly one of three classifications—committed and
+currently satisfied, historically committed and superseded, or historically
+committed with current state uncertain—reports whether a typed terminal
+fallback marker was recorded, and states that the operation must not be
+retried. Every journal-finalization-failure marker proves a historical commit.
+If Canvas later equals the operation preimage, `canvas inspect` reports an
+append-only inconsistency with the historical commit proven and current state
+uncertain; it never reports that operation as not committed.
+
+Historical-commit proof is monotonic across journal transitions. Once any
+terminal state proves a historical commit, later inspection failure, target
+mismatch or unavailability, Canvas validation failure, return to the preimage,
+or other reclassification preserves that proof and reports current state
+uncertain; it never writes or reports a non-proving terminal classification.
+
+After an interrupted ordinary Canvas mutation, failure to read its recovery
+journal returns exit `3`, names the operation UUID, and forbids retry. A
+`replacementFailed` path reports a possible commit with current Canvas and
+journal state uncertain. A `reloadFailed` path preserves a proven historical
+commit while reporting current Canvas and journal state uncertain. Both direct
+the operator to `canvas inspect` once journal access is available; neither is
+reported through the generic exit-`2` failure path.
+
+`canvas inspect` answers a durable `definiteNoCommit` terminal state from the
+journal before loading or validating mutable Canvas or target records. That
+stored classification remains authoritative if Canvas later becomes malformed
+or the target becomes unavailable, removed, or ambiguous. Inspections without
+such journal-only terminal proof retain strict live Canvas and target
+validation.
 
 ## Routing and GUI launch
 

@@ -79,7 +79,8 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         let work = try XCTUnwrap(model.state?.work.first)
         model.performCanvasAction(.start, work: work, reason: "Approved work began.", context: "Explicit test action.")
         XCTAssertTrue(model.state?.canvasCurrentIDs.contains(work.id) == true)
-        XCTAssertTrue(model.message?.contains("Placed, Engaged") == true)
+        XCTAssertTrue(model.message?.hasPrefix("Focused TASK-000001. Operation ") == true)
+        XCTAssertNil(model.sessionPackage)
     }
 
     func testInvalidFieldsAndUnregisteredTargetsAreRejectedBeforeJournal() throws {
@@ -137,7 +138,7 @@ final class CanvasWorkTransactionsTests: XCTestCase {
             guard case .conflict = error as? CanvasWorkTransactionError else { return XCTFail("Expected conflict, got \(error)") }
         }
         XCTAssertEqual(String(decoding: try fixture.data(at: "Office/Threads/Canvas.md"), as: UTF8.self), concurrent)
-        XCTAssertEqual(journal.journals.last?.terminalState, .preCommitFailure)
+        XCTAssertEqual(journal.journals.last?.terminalState, .definiteNoCommit)
     }
 
     func testJournalAndReplacementFailuresLeaveCanvasUntouched() throws {
@@ -151,7 +152,7 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         let replacementFailure = CanvasWorkTransactionService(journalStore: replacementJournal, replacer: FailingCanvasReplacer(), now: { self.date })
         XCTAssertThrowsError(try replacementFailure.perform(action: .start, configuration: config(fixture), work: task(fixture), reason: "Start.", context: "Test.", reload: { _ in fixture.load() }))
         XCTAssertEqual(try fixture.data(at: "Office/Threads/Canvas.md"), canvasBefore)
-        XCTAssertEqual(replacementJournal.journals.last?.terminalState, .preCommitFailure)
+        XCTAssertEqual(replacementJournal.journals.last?.terminalState, .definiteNoCommit)
     }
 
     func testCommittedReloadFailureIsReportedForInvestigationWithoutRetry() throws {
@@ -169,6 +170,58 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         XCTAssertEqual(try canvasRows(fixture).map { $0["Event"]! }, ["Placed", "Engaged"])
         XCTAssertEqual(journal.journals.last?.terminalState, .committedReloadFailed)
         XCTAssertTrue(service(journal: journal).startupRecovery().isEmpty)
+    }
+
+    func testExistingRecoveryJournalBytesRemainDecodableAfterOperationIdentityExtension() throws {
+        let legacy = LegacyCanvasJournal(
+            transactionID: UUID(),
+            timestamp: date,
+            action: .start,
+            workID: "TASK-000001",
+            canvasHash: "hash",
+            canvasPreimage: Data(emptyCanvas.utf8),
+            appendedEvents: ["Placed", "Engaged"],
+            terminalState: .preCommitFailure,
+            diagnostic: "Legacy journal."
+        )
+
+        let decoded = try JSONDecoder().decode(CanvasWorkTransactionJournal.self, from: JSONEncoder().encode(legacy))
+
+        XCTAssertEqual(decoded.transactionID, legacy.transactionID)
+        XCTAssertNil(decoded.reason)
+        XCTAssertNil(decoded.context)
+        XCTAssertNil(decoded.targetHash)
+        XCTAssertNil(decoded.expectedCanvasHash)
+        XCTAssertTrue(decoded.terminalState?.isIncomplete == true, "Legacy preCommitFailure journals remain visible because older replacement exceptions were not outcome-safe.")
+    }
+
+    func testHistoricalCommitProofCannotBeDowngradedByAnyNonProvingTransition() {
+        let provingStates: [CanvasWorkTransactionTerminalState] = [
+            .committed,
+            .reconciledCommit,
+            .historicalCommitSuperseded,
+            .historicallyCommittedWithCurrentStateUncertain,
+            .committedReloadFailed,
+            .journalFinalizationFailedCommittedAndCurrentlySatisfied,
+            .journalFinalizationFailedHistoricallyCommittedAndSuperseded,
+            .journalFinalizationFailedHistoricallyCommittedWithCurrentStateUncertain,
+        ]
+        let nonProvingStates: [CanvasWorkTransactionTerminalState] = [
+            .preCommitFailure,
+            .definiteNoCommit,
+            .alreadyDesired,
+            .uncertain,
+        ]
+
+        for current in provingStates {
+            XCTAssertTrue(current.provesHistoricalCommit)
+            for proposed in nonProvingStates {
+                XCTAssertTrue(
+                    CanvasWorkTransactionTerminalState.merging(current: current, proposed: proposed).provesHistoricalCommit,
+                    "\(current.rawValue) was downgraded by \(proposed.rawValue)"
+                )
+            }
+        }
     }
 
     private var emptyCanvas: String {
@@ -198,6 +251,18 @@ final class CanvasWorkTransactionsTests: XCTestCase {
     }
 }
 
+private struct LegacyCanvasJournal: Codable {
+    let transactionID: UUID
+    let timestamp: Date
+    let action: CanvasWorkAction
+    let workID: String
+    let canvasHash: String
+    let canvasPreimage: Data
+    let appendedEvents: [String]
+    let terminalState: CanvasWorkTransactionTerminalState?
+    let diagnostic: String?
+}
+
 private class MemoryCanvasJournal: CanvasWorkTransactionJournalStore {
     var journals: [CanvasWorkTransactionJournal] = []
     var failPersistence = false
@@ -215,7 +280,7 @@ private class MemoryCanvasJournal: CanvasWorkTransactionJournalStore {
     }
 
     func incomplete() throws -> [CanvasWorkTransactionJournal] {
-        journals.filter { $0.terminalState != .committed && $0.terminalState != .committedReloadFailed }
+        journals.filter { $0.terminalState?.isIncomplete ?? true }
     }
 }
 

@@ -87,21 +87,17 @@ final class ProductionsDashboardViewModel: ObservableObject {
     func performCanvasAction(_ action: CanvasWorkAction, work: WorkItem, reason: String, context: String) {
         guard let configuration = state?.configuration else { setMessage("Choose a valid Productions root before changing Canvas.", severity: .warning); return }
         do {
-            if action == .start {
-                let outcome = try SessionPreparationCoordinator(canvas: canvasWorkService, renderer: sessionService.renderer, reader: reader).startWorkAndPrepare(configuration: configuration, work: work, reason: reason, context: context, authorization: .readOnly, recommendedModel: "Codex", reasoningLevel: "high")
-                readOnlyLoad(configuration)
-                switch outcome {
-                case let .prepared(result, package):
-                    sessionPackage = package
-                    setMessage("Start work recorded for \(work.title) (\(work.id)): \(result.appendedEvents.joined(separator: ", ")). Session package prepared.", severity: .success)
-                case let .canvasCommittedPackageFailed(diagnostic):
-                    setMessage(diagnostic, severity: .warning)
-                }
-            } else {
-                let result = try canvasWorkService.perform(action: action, configuration: configuration, work: work, reason: reason, context: context) { ProductionsLoader(reader: self.reader).load(configuration: $0) }
-                readOnlyLoad(configuration)
-                setMessage("\(result.action.title) recorded for \(work.title) (\(work.id)): \(result.appendedEvents.joined(separator: ", ")).", severity: .success)
-            }
+            let desiredState: CanvasDesiredState = action == .start ? .focused : .clear
+            let result = try CanvasAttentionOperationService(canvas: canvasWorkService).perform(
+                desiredState: desiredState,
+                configuration: configuration,
+                work: work,
+                reason: reason,
+                context: context,
+                reload: { ProductionsLoader(reader: self.reader).load(configuration: $0) }
+            )
+            readOnlyLoad(configuration)
+            setMessage(result.compactDescription, severity: .success)
         } catch { setMessage(error.localizedDescription, severity: .failure) }
     }
     func prepareSession(work: WorkItem, authorization: SessionAuthorizationMode = .readOnly, model: String = "Codex", reasoning: String = "high") {
@@ -674,18 +670,18 @@ private struct WorkDetailView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     MementoSummaryView(memento: currentMemento)
                     Divider()
-                    Text("Prepare is read-only. Start records Canvas attention and then prepares the same package. Stop clears Canvas attention only.")
+                    Text("Prepare is read-only. Focus and Clear change only desired Canvas attention; session packages remain a separate action.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     AdaptiveActionRow {
                         Button("Prepare session…") { showingPrepare = true }
                             .accessibilityHint("Prepares a read-only start or resume package without changing Productions.")
-                        Button("Start work…") { pendingAction = .start }
+                        Button("Focus…") { pendingAction = .start }
                             .disabled(!availability.canStart)
-                            .accessibilityHint("Confirms an explicit Canvas transaction, then prepares a session package.")
-                        Button("Stop work…") { pendingAction = .stop }
+                            .accessibilityHint("Focuses this work on Canvas, or succeeds without another event when it is already focused.")
+                        Button("Clear…") { pendingAction = .stop }
                             .disabled(!availability.canStop)
-                            .accessibilityHint("Confirms a Canvas Cleared event without changing lifecycle or priority.")
+                            .accessibilityHint("Clears this work from Canvas, or succeeds without another event when it is already clear.")
                     }
                     AdaptiveActionRow {
                         Button(availability.mementoActionTitle) { showingMemento = true }
@@ -1080,17 +1076,18 @@ private struct CanvasWorkActionSheet: View {
     }
 
     var body: some View {
+        let actionTitle = action == .start ? "Focus" : "Clear"
         VStack(alignment: .leading, spacing: 14) {
-            Label(action.title, systemImage: action == .start ? "play.circle" : "stop.circle").font(.title3.weight(.semibold))
+            Label(actionTitle, systemImage: action == .start ? "scope" : "rectangle.slash").font(.title3.weight(.semibold))
             Text("\(work.title) (\(work.id))").font(.headline)
             GroupBox("Transaction boundary") {
                 VStack(alignment: .leading, spacing: 6) {
                     if action == .start {
-                        Label(isOnCanvas ? "Canvas change: append Engaged." : "Canvas change: append Placed, then Engaged.", systemImage: "rectangle.on.rectangle")
-                        Text("After Canvas commits, the same renderer prepares a read-only session package. A committed Canvas transaction is never retried if package generation then fails.")
+                        Label(isOnCanvas ? "Already focused: no Canvas event will be appended." : "Canvas change: append Placed, then Engaged.", systemImage: "rectangle.on.rectangle")
+                        Text("Focus does not render a session package. Prepare remains a separate read-only action.")
                     } else {
-                        Label("Canvas change: append Cleared.", systemImage: "rectangle.slash")
-                        Text("Stop does not change Registry lifecycle or priority and does not create or resolve a Memento.")
+                        Label(isOnCanvas ? "Canvas change: append Cleared." : "Already clear: no Canvas event will be appended.", systemImage: "rectangle.slash")
+                        Text("Clear does not change Registry lifecycle or priority and does not create or resolve a Memento.")
                     }
                 }
                 .font(.callout)
@@ -1102,7 +1099,7 @@ private struct CanvasWorkActionSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { cancel() }
-                Button(action.title) { confirm(reason, context) }
+                Button(actionTitle) { confirm(reason, context) }
                     .buttonStyle(.borderedProminent)
                     .disabled(reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

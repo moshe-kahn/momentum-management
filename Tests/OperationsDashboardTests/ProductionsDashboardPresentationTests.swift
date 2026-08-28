@@ -180,7 +180,7 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertTrue(active.canResolveMemento)
         let done = WorkItem(id: work.id, kind: work.kind, title: work.title, lifecycle: "Done / Complete", priority: "Unranked", lead: work.lead, department: work.department, product: work.product, workspacePath: work.workspacePath, related: work.related, content: work.content)
         XCTAssertFalse(ProductionsWorkActionAvailability(work: done, isOnCanvas: false, currentMemento: nil).canStart)
-        XCTAssertFalse(ProductionsWorkActionAvailability(work: done, isOnCanvas: false, currentMemento: nil).canStop)
+        XCTAssertTrue(ProductionsWorkActionAvailability(work: done, isOnCanvas: false, currentMemento: nil).canStop)
         XCTAssertFalse(ProductionsBundleActionAvailability(currentMemento: nil).canPrepare)
         XCTAssertTrue(ProductionsBundleActionAvailability(currentMemento: memento).canPrepare)
     }

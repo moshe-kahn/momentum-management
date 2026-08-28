@@ -265,7 +265,7 @@ struct ProductionsWorkActionAvailability: Equatable {
 
     init(work: WorkItem, isOnCanvas: Bool, currentMemento: Memento?) {
         canStart = !work.lifecycle.hasPrefix("Done")
-        canStop = isOnCanvas
+        canStop = true
         canPrepare = true
         mementoActionTitle = currentMemento == nil ? "Leave Memento…" : "Supersede Memento…"
         canResolveMemento = currentMemento != nil
