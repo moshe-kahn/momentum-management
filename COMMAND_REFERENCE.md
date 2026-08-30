@@ -6,7 +6,9 @@ All examples below show the executable name as `OperationsDashboard`. Quote opti
 
 ## Confirmation workflow
 
-Canonical mutations use a preview before execution:
+Canonical mutations normally use a preview before execution. The owner-authorized,
+complete-input `task checkpoint` transaction is the narrow exception described
+below:
 
 1. Run the command's preview form and retain its JSON output.
 2. Review the preview and its bound paths, identities, hashes, action, and proposed result.
@@ -18,6 +20,80 @@ Canvas, Memento, Flow, and capture-note previews emit a `preview` object and `co
 Capture-copy and automatic capture also bind the exact canonical preview bytes. Their preview output includes a base64 `confirmedPreview`; execution must pass that original envelope with `--confirmed-preview` and its `confirmationToken` with `--confirm`. Do not edit or regenerate an envelope. Automatic observation has an earlier equivalent pair, `observationEnvelope` and `observationToken`, used to request the second observation/preview.
 
 Confirmation tokens are state-bound, not reusable approvals. A changed source, destination, Productions contract, Inbox, Canvas, Memento, Flow, Identifier Ledger, or other previewed authority can invalidate execution.
+
+## Office Task checkpoint
+
+This command is callable only after independently verified DOC-0016 version
+1.12 adoption and with bounded owner authorization. Activation requires exact
+adopted byte identities for immutable contract, role, policy, and template
+members; exact adopted Document Registry metadata and rows; and exhaustive
+structural validation of the mutable Registries and provisional-hook Workspace
+migration, including exact fixed-record links, titles, H1s, record types, IDs,
+canonical status/location fields, and Registry/Workspace agreement for
+IDEA-0006 and TASK-0017. Every durable Registry row ID must also match its exact
+`TASK-`, `IDEA-`, `PROJ-`, or `INIT-` prefix with at least four digits. Any
+failure is `contractNotAdopted` before UUID, lock, journal, or write:
+
+```text
+OperationsDashboard task checkpoint \
+  --productions-root <path> --task <TASK-ID> \
+  --expected-workspace-sha256 <64-lowercase-hex> \
+  --expected-registry-sha256 <64-lowercase-hex> \
+  --unfinished-step <S##> \
+  --evidence <one-line accepted evidence> [--evidence <value> ...] \
+  --next-step <complete replacement text> \
+  --last-validated-state <complete replacement text>
+
+OperationsDashboard office inspect \
+  --productions-root <path> --operation <UUID>
+```
+
+Checkpoint inputs bind the complete Task Registry and Workspace preimages. The
+transaction checks only the exact unfinished Step, replaces only complete
+`Next step` and `Last validated state` values, and appends one UUID-bound
+`Checkpoint Evidence` stanza inside that section before its next H2, or creates
+the section at document end when absent. Later sections remain byte-identical.
+The Workspace must contain exactly one non-fenced H1 equal to both Registry and
+Core Title, and every target and reload must be a non-followed regular file. It
+rejects any additional Step-like occurrence of the requested Step ID, even when
+its checklist marker, brackets, bold delimiters, or spacing are malformed. It
+never rewrites Registry, lifecycle, priority,
+lead, dependencies, relationships, Canvas, Crumbs, Mementos, or Flow. The
+complete replacement values, exact Step, ordered evidence, and both hashes are
+the authorization boundary, so this command has no preview form.
+
+Output is stable JSON. `committed` exit 0 includes the operation UUID,
+completed Step, pre/post Workspace hashes, unchanged Registry hash, next gate,
+observed `focused`, `clear`, or `unknown` Canvas state, and always-present
+Boolean `historicalCommitProven`, `journalFinalized`, and `fallbackRecorded`.
+Only literal `committed` releases a later phase, which must bind the returned
+post-write Workspace hash.
+
+`not-committed` returns exit 2. `uncertain` returns exit 3. Every replacement
+exception, reload failure, journal-read failure after replacement, or terminal
+finalization failure names its UUID, supplies `office inspect`, and states
+`Do not retry automatically.` A typed fallback marker is attempted exactly
+once when normal terminal finalization fails; `fallbackRecorded` is true only
+when that marker was durably recorded. Historical-commit proof is monotonic.
+Failures before durable initial-journal creation never emit `inspectCommand`
+and diagnose that no operation journal was created.
+`office inspect` reads the journal first, answers durable definite-no-commit
+without consulting mutable canonical files, then requires the supplied
+canonical Productions root to exactly equal the journal's immutable root before
+any live read or journal reconciliation. A root mismatch freezes the journal
+and reports current-state uncertainty. On the bound root it distinguishes an
+exact current commit, a valid later superseding mutation, and current-state
+uncertainty. Inspection identity accepts every valid Task lifecycle, including
+a later `Done / Complete`, while checkpoint execution remains limited to
+non-Done eligible states. Before proof, live reads, startup reporting, or any
+update, the durable journal must bind its exact filename/requested UUID, payload
+UUID, schema, operation kind, fixed paths/IDs, and pre/post hashes; mismatch is
+`journal-read-failed` and never mutates the journal. Updates compare every
+immutable operation-envelope field to the exact durable payload and accept only
+the monotonic merged terminal state with consistent finalized/fallback flags;
+fallback state and historical-commit proof are sticky. Startup recovery reports
+incomplete operations but never replays,
+retries, restores, deletes, or finalizes one.
 
 ## Canvas
 
@@ -47,8 +123,8 @@ sentence containing the discoverable operation ID; `canvas inspect` exposes
 hashes, intended events, terminal state, historical evidence, current-boundary
 proof, and reconciliation diagnostics without mutating Productions.
 
-This surface is adopted for live ordinary Productions attention by Momentum
-Management Filesystem Contract (DOC-0016) version 1.11. The independently
+This surface remains adopted for live ordinary Productions attention by Momentum
+Management Filesystem Contract (DOC-0016) version 1.12. The independently
 accepted root `AGENTS.md` correction likewise directs routine task-execution
 attention to `canvas focus` and `canvas clear`, while retaining
 preview-confirmed low-level Start and Stop for explicitly sensitive or manual
@@ -211,7 +287,7 @@ Execution durably claims the receipt before the first move. Receipts cannot be c
 | `2` | Usage, validation, confirmation, eligibility, collision, stale-state, or another failure classified by that command as pre-mutation. | Do not infer retry safety from the code alone. Follow the state-specific diagnostic; retry only when it establishes that no mutation occurred, after resolving the cause and obtaining a fresh preview when required. |
 | `3` | Mutation committed, partially committed, or may have committed; verification, reload, journaling, or later work failed. | Do not retry automatically. Inspect the diagnostic and canonical state, then recover manually. |
 
-Not every command emits every code. Canvas, Memento, Flow, capture-note, capture-copy, and automatic capture emit `3` for their documented committed, partial, recovery-required, or uncertain outcomes. Exit `2` is not a blanket statement that an unchanged retry is appropriate.
+Not every command emits every code. Task checkpoint, Canvas, Memento, Flow, capture-note, capture-copy, and automatic capture emit `3` for their documented committed, partial, recovery-required, or uncertain outcomes. Exit `2` is not a blanket statement that an unchanged retry is appropriate.
 
 For ordinary Canvas focus/clear, exit `2` is a definite pre-mutation failure
 or exhausted pre-mutation lock wait. Exit `3` includes the operation identity
@@ -253,6 +329,6 @@ validation.
 
 ## Routing and GUI launch
 
-A malformed invocation owned by the `canvas`, `memento`, `flow`, or `capture` command family remains headless: it prints usage or a diagnostic and exits 2 instead of opening the GUI. This includes incomplete forms such as `capture`, `capture unknown`, and `capture preview unknown`.
+A malformed invocation owned by the `task`, `office`, `canvas`, `memento`, `flow`, or `capture` command family remains headless: it prints stable JSON, usage, or a diagnostic and exits 2 instead of opening the GUI. This includes incomplete forms such as `task`, `office`, `capture`, `capture unknown`, and `capture preview unknown`.
 
 Launching `OperationsDashboard` with no arguments does not select a headless command. It retains the normal Operations Dashboard GUI launch.
