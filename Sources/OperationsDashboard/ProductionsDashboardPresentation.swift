@@ -10,6 +10,7 @@ enum ProductionsNavigationGroup: String, CaseIterable, Identifiable {
 
 enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     case inbox
+    case reconciliations
     case processing
     case canvas
     case crumbs
@@ -23,6 +24,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .inbox: "Inbox"
+        case .reconciliations: "Reconciliation Review"
         case .processing: "Processing"
         case .canvas: "Canvas"
         case .crumbs: "Crumbs"
@@ -36,6 +38,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     var emptyTitle: String {
         switch self {
         case .inbox: "Inbox is empty"
+        case .reconciliations: "No pending reconciliations"
         case .processing: "No processing bundles"
         case .canvas: "Canvas is empty"
         case .crumbs: "No open Crumbs"
@@ -49,6 +52,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .inbox: "tray"
+        case .reconciliations: "arrow.triangle.2.circlepath"
         case .processing: "shippingbox"
         case .canvas: "rectangle.on.rectangle"
         case .crumbs: "circle.grid.3x3"
@@ -61,7 +65,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
 
     var group: ProductionsNavigationGroup {
         switch self {
-        case .inbox, .processing: .intake
+        case .inbox, .reconciliations, .processing: .intake
         case .canvas, .crumbs, .mementos, .priorityWork: .focus
         case .workItems, .plans: .browse
         }
@@ -124,6 +128,17 @@ enum ProductionsDashboardPresentation {
                     subtitle: item.summary,
                     metadata: item.isUnregistered ? ["Unregistered", "Unknown department"] : [item.type, item.priority, departmentLabel(item.department)],
                     department: normalizedDepartment(item.department)
+                )
+            }
+        case .reconciliations:
+            state.reconciliations.map { item in
+                let department = targetDepartment(item.workID, in: state)
+                let occurred = ISO8601DateFormatter().string(from: item.occurred)
+                return ProductionsNavigationItem(
+                    id: "reconciliation:\(item.operationID.uuidString)", targetID: item.workID,
+                    title: "\(item.workID) · \(item.workTitle)", subtitle: item.summary,
+                    metadata: ["Pending owner confirmation", occurred, item.operationID.uuidString, item.fields.joined(separator: ", "), departmentLabel(department)],
+                    department: department
                 )
             }
         case .processing:

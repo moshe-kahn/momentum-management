@@ -113,6 +113,12 @@ struct TaskCheckpointJournal: Codable, Equatable {
     let acceptedEvidence: [String]
     let nextStep: String
     let lastValidatedState: String
+    let reconciliationWorkTitle: String?
+    let lifecyclePriorityRepairs: [LifecyclePriorityRepair]?
+    let reconciliationLifecycle: String?
+    let reconciliationPriority: String?
+    let reconciliationPriorityRule: LifecyclePriorityRule?
+    private(set) var reconciliationQueueDisposition: ReconciliationDisposition?
     private(set) var terminalState: OfficeWorkspaceTerminalState?
     private(set) var journalFinalized: Bool
     private(set) var fallbackRecorded: Bool
@@ -130,6 +136,10 @@ struct TaskCheckpointJournal: Codable, Equatable {
         fallbackRecorded = true
         self.diagnostic = diagnostic
     }
+
+    mutating func acknowledgeReconciliation() { reconciliationQueueDisposition = .confirmed }
+    mutating func markReconciliationCorrected() { reconciliationQueueDisposition = .corrected }
+    mutating func preserveReconciliationDisposition(_ value: ReconciliationDisposition?) { reconciliationQueueDisposition = value }
 }
 
 protocol TaskCheckpointJournalStore {
@@ -161,28 +171,40 @@ struct ApplicationSupportTaskCheckpointJournalStore: TaskCheckpointJournalStore 
             throw TaskCheckpointJournalEnvelopeError.invalid("An initial journal must be unfinalized, nonfallback, and nonterminal.")
         }
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard try matchingJournalURLs(operationID: journal.operationUUID).isEmpty else {
-            throw TaskCheckpointJournalEnvelopeError.invalid("A journal already exists for the issued operation UUID.")
+        try OfficeJournalAtomicCoordinator.withLock(directory: directory) {
+            guard try matchingJournalURLs(operationID: journal.operationUUID).isEmpty else {
+                throw TaskCheckpointJournalEnvelopeError.invalid("A journal already exists for the issued operation UUID.")
+            }
+            try writeNewUnchecked(journal)
         }
-        try writeUnchecked(journal)
     }
 
     func update(_ journal: TaskCheckpointJournal) throws {
         try journal.validateEnvelope(requestedOperationID: journal.operationUUID)
-        guard let durable = try self.journal(operationID: journal.operationUUID) else {
-            throw TaskCheckpointJournalEnvelopeError.invalid("The bound recovery journal is unavailable for update.")
+        try OfficeJournalAtomicCoordinator.withLock(directory: directory) {
+            let (url, durableBytes, durable) = try durableSnapshot(operationID: journal.operationUUID)
+            var merged = journal
+            if merged.terminalState != durable.terminalState,
+               merged.reconciliationQueueDisposition != durable.reconciliationQueueDisposition {
+                merged.preserveReconciliationDisposition(durable.reconciliationQueueDisposition)
+            }
+            try merged.validateUpdate(from: durable, requiresFallback: false)
+            try compareAndReplace(merged, expectedBytes: durableBytes, at: url)
         }
-        try journal.validateUpdate(from: durable, requiresFallback: false)
-        try writeUnchecked(journal)
     }
 
     func recordFallback(_ journal: TaskCheckpointJournal) throws {
         try journal.validateEnvelope(requestedOperationID: journal.operationUUID)
-        guard let durable = try self.journal(operationID: journal.operationUUID) else {
-            throw TaskCheckpointJournalEnvelopeError.invalid("The bound recovery journal is unavailable for fallback recording.")
+        try OfficeJournalAtomicCoordinator.withLock(directory: directory) {
+            let (url, durableBytes, durable) = try durableSnapshot(operationID: journal.operationUUID)
+            var merged = journal
+            if merged.terminalState != durable.terminalState,
+               merged.reconciliationQueueDisposition != durable.reconciliationQueueDisposition {
+                merged.preserveReconciliationDisposition(durable.reconciliationQueueDisposition)
+            }
+            try merged.validateUpdate(from: durable, requiresFallback: true)
+            try compareAndReplace(merged, expectedBytes: durableBytes, at: url)
         }
-        try journal.validateUpdate(from: durable, requiresFallback: true)
-        try writeUnchecked(journal)
     }
 
     func journal(operationID: UUID) throws -> TaskCheckpointJournal? {
@@ -203,6 +225,10 @@ struct ApplicationSupportTaskCheckpointJournalStore: TaskCheckpointJournalStore 
                 let stem = url.deletingPathExtension().lastPathComponent
                 guard let operationID = UUID(uuidString: stem), url.lastPathComponent == "\(operationID.uuidString).json" else {
                     throw TaskCheckpointJournalEnvelopeError.invalid("A startup journal filename is not one exact canonical UUID.")
+                }
+                let data = try Data(contentsOf: url)
+                guard (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["operationKind"] as? String == "task-checkpoint" else {
+                    return nil
                 }
                 let value = try readBoundJournal(at: url, requestedOperationID: operationID)
                 return value.terminalState == nil || value.terminalState?.isStartupIncomplete == true ? value : nil
@@ -226,13 +252,35 @@ struct ApplicationSupportTaskCheckpointJournalStore: TaskCheckpointJournalStore 
         return value
     }
 
-    private func writeUnchecked(_ journal: TaskCheckpointJournal) throws {
-        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    private func encoded(_ journal: TaskCheckpointJournal) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        try DurableReplacement(manager: manager).replace(
-            data: try encoder.encode(journal),
-            at: directory.appending(path: "\(journal.operationUUID.uuidString).json")
+        return try encoder.encode(journal)
+    }
+
+    private func writeNewUnchecked(_ journal: TaskCheckpointJournal) throws {
+        let url = directory.appending(path: "\(journal.operationUUID.uuidString).json")
+        let data = try encoded(journal)
+        try DurableReplacement(manager: manager).replace(data: data, at: url)
+        guard try OfficeJournalAtomicCoordinator.readRegular(url) == data else {
+            throw TaskCheckpointJournalEnvelopeError.invalid("The initial durable journal failed exact reload validation.")
+        }
+    }
+
+    private func durableSnapshot(operationID: UUID) throws -> (URL, Data, TaskCheckpointJournal) {
+        let matches = try matchingJournalURLs(operationID: operationID)
+        guard matches.count == 1, TaskCheckpointUTF8.equal(matches[0].lastPathComponent, "\(operationID.uuidString).json") else {
+            throw TaskCheckpointJournalEnvelopeError.invalid("The bound recovery journal is unavailable or ambiguous for update.")
+        }
+        let bytes = try OfficeJournalAtomicCoordinator.readRegular(matches[0])
+        let durable = try JSONDecoder().decode(TaskCheckpointJournal.self, from: bytes)
+        try durable.validateEnvelope(requestedOperationID: operationID)
+        return (matches[0], bytes, durable)
+    }
+
+    private func compareAndReplace(_ journal: TaskCheckpointJournal, expectedBytes: Data, at url: URL) throws {
+        try OfficeJournalAtomicCoordinator.replaceIfUnchanged(
+            expectedDurableBytes: expectedBytes, proposedBytes: try encoded(journal), at: url, manager: manager
         )
     }
 }
@@ -278,6 +326,92 @@ enum TaskCheckpointCanonicalRoot {
     }
 }
 
+/// Shared journal serialization for every Office Workspace writer. The lock is
+/// process-recursive on one thread and an advisory cross-process flock on the
+/// exact non-followed recovery directory. Stores perform byte-exact CAS under
+/// this lock immediately before every durable journal replacement.
+enum OfficeJournalAtomicCoordinator {
+    private static let processLock = NSRecursiveLock()
+
+    final class Token {
+        fileprivate let key: String
+        fileprivate let descriptor: Int32?
+        fileprivate init(key: String, descriptor: Int32?) { self.key = key; self.descriptor = descriptor }
+        deinit { OfficeJournalAtomicCoordinator.release(key: key, descriptor: descriptor) }
+    }
+
+    static func acquire(directory: URL) throws -> Token {
+        processLock.lock()
+        let key = directory.path.utf8.map { String(format: "%02x", $0) }.joined()
+        let depthKey = "OfficeJournalAtomicCoordinator.\(key)"
+        let depth = Thread.current.threadDictionary[depthKey] as? Int ?? 0
+        if depth > 0 {
+            Thread.current.threadDictionary[depthKey] = depth + 1
+            return Token(key: key, descriptor: nil)
+        }
+        var pathStatus = stat()
+        guard lstat(directory.path, &pathStatus) == 0, pathStatus.st_mode & S_IFMT == S_IFDIR else {
+            processLock.unlock()
+            throw TaskCheckpointValidationError.targetContractInvalid("The recovery root is not an exact non-followed directory.")
+        }
+        let descriptor = open(directory.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            processLock.unlock()
+            throw TaskCheckpointValidationError.targetContractInvalid("The recovery root cannot be opened without following links.")
+        }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0, opened.st_mode & S_IFMT == S_IFDIR,
+              opened.st_dev == pathStatus.st_dev, opened.st_ino == pathStatus.st_ino,
+              flock(descriptor, LOCK_EX) == 0 else {
+            close(descriptor); processLock.unlock()
+            throw TaskCheckpointValidationError.targetContractInvalid("The recovery root could not be identity-bound and locked.")
+        }
+        Thread.current.threadDictionary[depthKey] = 1
+        return Token(key: key, descriptor: descriptor)
+    }
+
+    static func withLock<T>(directory: URL, _ body: () throws -> T) throws -> T {
+        let token = try acquire(directory: directory)
+        defer { _ = token }
+        return try body()
+    }
+
+    static func readRegular(_ url: URL) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else {
+            throw TaskCheckpointValidationError.targetContractInvalid("A recovery journal cannot be opened without following links.")
+        }
+        defer { close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG else {
+            throw TaskCheckpointValidationError.targetContractInvalid("A recovery journal is not a descriptor-bound regular file.")
+        }
+        return try FileHandle(fileDescriptor: descriptor, closeOnDealloc: false).readToEnd() ?? Data()
+    }
+
+    static func replaceIfUnchanged(expectedDurableBytes: Data, proposedBytes: Data, at url: URL, manager: FileManager) throws {
+        guard try readRegular(url) == expectedDurableBytes else {
+            throw TaskCheckpointValidationError.targetContractInvalid("The durable journal changed before compare-and-swap replacement.")
+        }
+        try DurableReplacement(manager: manager).replace(data: proposedBytes, at: url)
+        guard try readRegular(url) == proposedBytes else {
+            throw TaskCheckpointValidationError.targetContractInvalid("The durable journal replacement failed exact reload validation.")
+        }
+    }
+
+    private static func release(key: String, descriptor: Int32?) {
+        let depthKey = "OfficeJournalAtomicCoordinator.\(key)"
+        let depth = Thread.current.threadDictionary[depthKey] as? Int ?? 1
+        if depth > 1 {
+            Thread.current.threadDictionary[depthKey] = depth - 1
+        } else {
+            Thread.current.threadDictionary.removeObject(forKey: depthKey)
+            if let descriptor { flock(descriptor, LOCK_UN); close(descriptor) }
+        }
+        processLock.unlock()
+    }
+}
+
 extension ProductionsConfiguration {
     var taskCheckpointRootURL: URL { TaskCheckpointCanonicalRoot.url(productionsRootPath) }
 
@@ -309,12 +443,39 @@ private extension TaskCheckpointJournal {
               workspaceSHA256ExpectedAfter == envelopeSHA256(workspaceExpectedAfter) else {
             throw TaskCheckpointJournalEnvelopeError.invalid("UUID, schema, operation kind, fixed path/ID grammar, or bound pre/post hashes do not match.")
         }
+        if let repairs = lifecyclePriorityRepairs, !repairs.isEmpty {
+            guard reconciliationWorkTitle?.isEmpty == false,
+                  reconciliationLifecycle != nil,
+                  reconciliationPriority != nil,
+                  reconciliationPriorityRule != nil,
+                  reconciliationQueueDisposition != nil else {
+                throw TaskCheckpointJournalEnvelopeError.invalid("A composed mirror repair lacks its complete queue envelope.")
+            }
+            if terminalState == nil, reconciliationQueueDisposition != .pending {
+                throw TaskCheckpointJournalEnvelopeError.invalid("An initial composed mirror repair must enter the pending queue.")
+            }
+        } else if reconciliationQueueDisposition != nil || reconciliationWorkTitle != nil || reconciliationLifecycle != nil || reconciliationPriority != nil || reconciliationPriorityRule != nil {
+            throw TaskCheckpointJournalEnvelopeError.invalid("A checkpoint without mirror repairs cannot carry queue metadata.")
+        }
         try validateTerminalFlags()
     }
 
     func validateUpdate(from durable: TaskCheckpointJournal, requiresFallback: Bool) throws {
         guard immutableEnvelopeEquals(durable) else {
             throw TaskCheckpointJournalEnvelopeError.invalid("A journal update attempted to substitute an immutable operation-envelope field.")
+        }
+        let dispositionChanged = reconciliationQueueDisposition != durable.reconciliationQueueDisposition
+        if dispositionChanged {
+            guard durable.terminalState?.provesHistoricalCommit == true,
+                  durable.reconciliationQueueDisposition == .pending,
+                  reconciliationQueueDisposition == .confirmed || reconciliationQueueDisposition == .corrected,
+                  terminalState == durable.terminalState,
+                  journalFinalized == durable.journalFinalized,
+                  fallbackRecorded == durable.fallbackRecorded,
+                  diagnostic == durable.diagnostic else {
+                throw TaskCheckpointJournalEnvelopeError.invalid("A checkpoint reconciliation disposition transition is invalid.")
+            }
+            return
         }
         guard let proposedState = terminalState,
               proposedState == OfficeWorkspaceTerminalState.merging(current: durable.terminalState, proposed: proposedState) else {
@@ -357,7 +518,12 @@ private extension TaskCheckpointJournal {
         targetFingerprint == other.targetFingerprint &&
         acceptedEvidence == other.acceptedEvidence &&
         nextStep == other.nextStep &&
-        lastValidatedState == other.lastValidatedState
+        lastValidatedState == other.lastValidatedState &&
+        reconciliationWorkTitle == other.reconciliationWorkTitle &&
+        lifecyclePriorityRepairs == other.lifecyclePriorityRepairs &&
+        reconciliationLifecycle == other.reconciliationLifecycle &&
+        reconciliationPriority == other.reconciliationPriority &&
+        reconciliationPriorityRule == other.reconciliationPriorityRule
     }
 
     private func validateTerminalFlags() throws {
@@ -532,8 +698,8 @@ struct AdoptedOfficeV112ContractValidator: OfficeV112ContractValidating {
             rows.append(Dictionary(uniqueKeysWithValues: zip(headers, values)))
             index += 1
         }
-        for later in lines.dropFirst(index) where later.range(of: #"^\|\s*DOC-[0-9]{4,}\s*\|"#, options: .regularExpression) != nil {
-            throw OfficeContractValidationError.contractNotAdopted("Document Registry contains a fragmented or hidden later row.")
+        for later in lines.dropFirst(index) where later.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+            throw OfficeContractValidationError.contractNotAdopted("Document Registry contains a hidden, wrong-kind, or malformed later table fragment.")
         }
         let expected: [String: [String: String]] = [
             "DOC-0004": [
@@ -599,8 +765,8 @@ struct AdoptedOfficeV112ContractValidator: OfficeV112ContractValidating {
             }
             index += 1
         }
-        for later in lines.dropFirst(index) where later.range(of: "^\\|\\s*\(durablePrefix)-[0-9]{4,}\\s*\\|", options: .regularExpression) != nil {
-            throw OfficeContractValidationError.contractNotAdopted("\(path) contains a fragmented or hidden later durable row.")
+        for later in lines.dropFirst(index) where later.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+            throw OfficeContractValidationError.contractNotAdopted("\(path) contains a hidden, wrong-kind, or malformed later table fragment.")
         }
     }
 
@@ -814,6 +980,7 @@ private struct TaskCheckpointPreparedTarget {
     let workspaceData: Data
     let workspace: TaskWorkspaceDocument
     let replacementData: Data
+    let mirrorRepair: LifecyclePriorityMirrorRepairPlan
     let targetFingerprint: String
 }
 
@@ -926,6 +1093,12 @@ struct TaskCheckpointService {
             acceptedEvidence: request.acceptedEvidence,
             nextStep: request.nextStep,
             lastValidatedState: request.lastValidatedState,
+            reconciliationWorkTitle: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.workTitle,
+            lifecyclePriorityRepairs: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.repairs,
+            reconciliationLifecycle: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.lifecycle,
+            reconciliationPriority: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.priority,
+            reconciliationPriorityRule: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.priorityRule,
+            reconciliationQueueDisposition: prepared.mirrorRepair.repairs.isEmpty ? nil : .pending,
             terminalState: nil,
             journalFinalized: false,
             fallbackRecorded: false,
@@ -1118,7 +1291,8 @@ struct TaskCheckpointService {
         guard hash(workspaceData) == request.expectedWorkspaceSHA256 else {
             throw TaskCheckpointValidationError.hashMismatch("Task Workspace SHA-256 does not match the authorized preimage.")
         }
-        let workspace = try TaskWorkspaceDocument(data: workspaceData)
+        let mirrorRepair = try LifecyclePriorityMirrorReconciler.task(registryData: registryData, workspaceData: workspaceData, taskID: request.taskID)
+        let workspace = try TaskWorkspaceDocument(data: mirrorRepair.workspaceAfter)
         try workspace.validateIdentityAndRelationships(taskID: request.taskID, registryRow: row)
         let replacement = try workspace.checkpointReplacement(
             stepID: request.unfinishedStep,
@@ -1142,7 +1316,7 @@ struct TaskCheckpointService {
         return TaskCheckpointPreparedTarget(
             registryData: registryData, registry: registry, row: row,
             workspaceURL: workspaceURL, workspaceData: workspaceData, workspace: workspace,
-            replacementData: replacement,
+            replacementData: replacement, mirrorRepair: mirrorRepair,
             targetFingerprint: targetFingerprint(row: row, workspacePath: workspacePath)
         )
     }
@@ -1165,7 +1339,10 @@ struct TaskCheckpointService {
         guard targetFingerprint(row: row, workspacePath: journal.workspacePath) == journal.targetFingerprint else {
             throw TaskCheckpointValidationError.targetContractInvalid("The bound Task identity or Registry relationship changed.")
         }
-        let before = try TaskWorkspaceDocument(data: journal.workspacePreimage)
+        let repairedBase = try LifecyclePriorityMirrorReconciler.task(
+            registryData: registryData, workspaceData: journal.workspacePreimage, taskID: journal.taskID
+        ).workspaceAfter
+        let before = try TaskWorkspaceDocument(data: repairedBase)
         let after = try TaskWorkspaceDocument(data: workspaceData)
         try after.validateIdentityAndRelationships(taskID: journal.taskID, registryRow: row)
         try before.validateCheckpointPostimage(
@@ -1418,6 +1595,8 @@ struct TaskCheckpointService {
         case TaskCheckpointValidationError.hashMismatch: "hashMismatch"
         case TaskCheckpointValidationError.targetContractInvalid: "targetContractInvalid"
         case TaskCheckpointValidationError.invalidInput: "invalidInput"
+        case LifecyclePriorityValidationError.targetContractInvalid: "targetContractInvalid"
+        case LifecyclePriorityValidationError.invalidInput: "invalidInput"
         default: "not-committed"
         }
     }
@@ -1531,8 +1710,8 @@ struct TaskRegistryDocument {
             parsed.append(Dictionary(uniqueKeysWithValues: zip(Self.headers, values)))
             index += 1
         }
-        for later in lines.dropFirst(index) where later.range(of: #"^\|\s*TASK-[0-9]{4,}\s*\|"#, options: .regularExpression) != nil {
-            throw TaskCheckpointValidationError.targetContractInvalid("Task Registry contains a hidden or fragmented later Task row.")
+        for later in lines.dropFirst(index) where later.trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+            throw TaskCheckpointValidationError.targetContractInvalid("Task Registry contains a hidden, wrong-kind, or malformed later table fragment.")
         }
         rows = parsed
     }

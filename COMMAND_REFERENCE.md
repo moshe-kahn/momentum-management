@@ -75,7 +75,10 @@ The Workspace must contain exactly one non-fenced H1 equal to both Registry and
 Core Title, and every target and reload must be a non-followed regular file. It
 rejects any additional Step-like occurrence of the requested Step ID, even when
 its checklist marker, brackets, bold delimiters, or spacing are malformed. It
-never rewrites Registry, lifecycle, priority,
+never rewrites Registry. Before applying the checkpoint, it validates every
+recognized lifecycle/priority mirror and, when stale, composes the exact
+Registry-authoritative mirror repair into the same journal-bound Workspace
+replacement and reconciliation queue entry. It otherwise never rewrites lifecycle, priority,
 lead, dependencies, relationships, Canvas, Crumbs, Mementos, or Flow. The
 complete replacement values, exact Step, ordered evidence, and both hashes are
 the authorization boundary, so this command has no preview form.
@@ -85,10 +88,12 @@ dependent Task Workspace preimages. The command requires the dependent's
 Registry and Workspace `Depends on` relationship to name the source exactly
 once, the source Workspace `Related records` relationship to name the
 dependent exactly once, and the contained evidence file to include the exact
-authorized source commit. Its sole canonical edit is one immutable
+authorized source commit. Its canonical edit is one immutable
 `Marker | Accepted at | Evidence` row in the source's unique `Accepted
-Handoffs` section, creating that optional section at document end when absent.
-It never edits Registry, the dependent Workspace, lifecycle, priority, Canvas,
+Handoffs` section, creating that optional section at document end when absent,
+plus any exact Registry-authoritative repair of recognized stale
+lifecycle/priority mirrors in that same source Workspace and durable queue
+envelope. It never edits Registry, the dependent Workspace, Canvas,
 or eligibility dispositions and never starts or activates the dependent.
 
 Output is stable JSON. `committed` exit 0 includes the operation UUID,
@@ -131,13 +136,91 @@ UUID, schema, operation kind, fixed paths/IDs, and pre/post hashes; mismatch is
 immutable operation-envelope field to the exact durable payload and accept only
 the monotonic merged terminal state with consistent finalized/fallback flags;
 fallback state and historical-commit proof are sticky. Startup recovery reports
-incomplete operations but never replays,
-retries, restores, deletes, or finalizes one.
+incomplete operations and never replays or retries the authorized action. For a
+lifecycle-priority journal stopped after exactly one of its two bound renames,
+`office inspect` reacquires the writer lock and may restore only the exact known
+postimage to its exact preimage, validate both complete preimages, and durably
+classify definite no commit; any foreign or changing bytes remain uncertain.
 If accepted-handoff inspection completely validates an expected postimage from
 a formerly nonproving journal, that validation establishes monotonic historical
 commit proof before terminal finalization. A finalization failure uses the same
 typed committed fallback and no-retry outcome; it never returns to an unproven
 classification.
+
+## Lifecycle and priority mirror reconciliation
+
+The bounded Office reconciliation surface supports Tasks, Ideas, Projects, and
+Initiatives. Preview is read-only and binds the complete Registry and Workspace
+preimages, exact durable identity, selected priority rule, optional explicit
+owner decision, complete proposed postimages, and correction relationship:
+
+```text
+OperationsDashboard office reconcile preview \
+  --productions-root <path> --work <DURABLE-ID> \
+  --priority-rule <registry|maximum> \
+  --expected-workspace-sha256 <64-lowercase-hex> \
+  --expected-registry-sha256 <64-lowercase-hex> \
+  [--state <exact-lifecycle-or-disposition>] [--priority <exact-priority>] \
+  [--corrects-operation <UUID>]
+
+OperationsDashboard office reconcile apply \
+  --productions-root <path> --work <DURABLE-ID> \
+  --priority-rule <registry|maximum> \
+  --expected-workspace-sha256 <64-lowercase-hex> \
+  --expected-registry-sha256 <64-lowercase-hex> \
+  [--state <exact-lifecycle-or-disposition>] [--priority <exact-priority>] \
+  [--corrects-operation <UUID>] --confirm <preview-token>
+```
+
+Only two Workspace mirror forms are repairable: unique exact `State`,
+`Disposition`, `Lifecycle`, or `Priority` fields in the fenced Core record;
+and one exact Task/Idea/Project/Initiative lifecycle-and-priority sentence in a
+unique `Lifecycle and Attention` section. Missing mirrors stay absent.
+Unknown values, malformed or duplicate mirrors, ambiguous identity, a
+noncanonical path, invalid Registry rows, and nondeterministic replacements are
+pre-mutation failures.
+
+Lifecycle uses the Registry value unless the reviewed request contains an
+explicit new lifecycle. It never infers reactivation, greater activity, or
+completion from Workspace prose. `--priority-rule registry` identifies an
+owner-authorized Registry decision and preserves it. `--priority-rule maximum`
+is for a recognized conflict without provenance and chooses the deterministic
+maximum `Highest > High > Medium > Low > Unranked`. An explicit `--priority`
+is the reviewed owner decision. Terminal durable work must remain `Unranked`.
+
+Apply takes the shared Registry-and-Workspace lock, creates one durable journal,
+revalidates both complete preimages and the confirmation token, prepares all
+postimages before replacement, replaces only the exact Registry cells and
+recognized Workspace mirrors, reloads complete agreement, and finalizes the
+journal. A partial replacement is restored only when exact known postimages can
+be returned to exact preimages under the lock; otherwise the result is
+`uncertain`. Literal outcomes, historical-proof monotonicity, typed fallback,
+`office inspect`, and “Do not retry automatically” rules match the other Office
+writers. Lifecycle, priority, and Canvas remain independent; reconciliation
+never focuses, starts, pauses, completes, activates, or reprioritizes work beyond
+the values shown in the confirmed preview.
+
+Every committed discrepancy repair remains a pending administrative queue row
+in its originating lifecycle-priority, checkpoint, or accepted-handoff journal.
+It contains the work ID and title, field, prevalues,
+chosen value, rule/provenance, operation UUID, and time. The Dashboard surfaces
+these rows in **Reconciliation Review** beside Inbox. Headless review is:
+
+```text
+OperationsDashboard office reconciliation list --productions-root <path>
+OperationsDashboard office reconciliation acknowledge \
+  --productions-root <path> --operation <UUID>
+```
+
+Acknowledgement changes only the durable queue disposition to `confirmed`; it
+does not change Registry, Workspace, lifecycle, priority, or Canvas. A reviewed
+owner correction uses another hash-bound `office reconcile` transaction with
+explicit values and `--corrects-operation`; only its proven commit changes the
+older queue disposition to `corrected`. Queue and terminal-proof updates are
+monotonic and byte-bind every immutable journal field. A failed acknowledgement
+update returns exit 3 with `office inspect` and no-retry guidance. A proven
+correction's `correctsOperation` is consumed by inspection/list recovery if its
+post-commit update of the older queue entry was interrupted.
 
 ## Canvas
 

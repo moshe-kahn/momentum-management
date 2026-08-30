@@ -4,12 +4,33 @@
 
 Tests use fixture directories, in-memory configuration storage, and injected filesystem failures to avoid the real user filesystem. No layer receives a real Kahntra path during development or validation.
 
+`LifecyclePriorityService` owns the hash-bound Registry/Workspace consistency
+boundary for durable work. It recognizes only exact legacy Core mirrors and the
+exact Lifecycle-and-Attention sentence, treats Registry lifecycle as authority,
+and uses either an explicit Registry decision or the deterministic priority
+maximum. Preview binds complete pre/post bytes. Apply shares the root-scoped
+writer lock, persists a full two-file recovery envelope, uses all-or-restore
+replacement, reloads complete agreement, and preserves monotonic historical
+proof. An incomplete exact one-file publication is surfaced at startup and can
+be restored to both complete preimages only under the writer lock by explicit
+inspection. The originating lifecycle-priority, checkpoint, or accepted-handoff
+journal is the administrative reconciliation-queue entry, so no parallel
+canonical or unregistered payload mechanism exists.
+Pending entries are loaded read-only and presented in Reconciliation Review
+beside Inbox; acknowledgement changes only the queue disposition. Every
+lifecycle-priority, checkpoint, and accepted-handoff journal creation,
+finalization, fallback, inspection reconciliation, and queue update uses one
+re-entrant cross-process recovery-directory lock plus an exact durable-byte
+compare-and-swap. A correction reserves its proven pending target under that
+same lock through canonical commit and the final corrected disposition.
+
 `TaskCheckpointService` owns the v1.12 Task-checkpoint write boundary. It runs
 the global adoption gate before issuing an operation UUID, acquires the shared
 root-scoped Task Registry-and-Workspace lock, parses exact Registry and
 Workspace structures (including one Registry/Core-matching, non-fenced H1),
-requires every target and reload to be a non-followed regular file, prepares
-only the authorized Workspace ranges, persists
+requires every target and reload to be a non-followed regular file, composes an
+exact Registry-authoritative repair of any recognized stale lifecycle/priority
+mirror into its authorized Workspace replacement, persists
 the full pre/post journal outside Productions, rechecks both preimages, uses
 durable same-directory replacement, reloads the complete target agreement, and
 observes Canvas without changing it. `OfficeWorkspaceTerminalState` centralizes
@@ -35,9 +56,14 @@ does not provide a second filesystem mutation path.
 state, canonical-root and no-follow primitives while retaining a distinct
 typed operation journal. It binds the Task Registry, source and dependent Task
 Workspaces, reciprocal relationship, source commit, and contained evidence;
-its only canonical replacement appends one immutable accepted-handoff row to
-the source Workspace. Normal finalization precedes read-only reverse discovery,
+its canonical replacement appends one immutable accepted-handoff row and any
+exact Registry-authoritative repair of recognized stale lifecycle/priority
+mirrors to the source Workspace. Normal finalization precedes read-only reverse discovery,
 so a discovery failure cannot roll back or weaken a proven marker commit.
 `ApplicationSupportOfficeWorkspaceInspector` reads the exact journal envelope
-and dispatches `office inspect` to the checkpoint or accepted-handoff service;
-neither inspection path retries or mutates an authorized Workspace operation.
+and dispatches `office inspect` through exactly three transaction paths:
+checkpoint, accepted-handoff, or lifecycle-priority reconciliation. Lifecycle
+inspection can acquire the shared writer lock and restore an exact incomplete
+split publication to both exact preimages after revalidating both no-follow
+regular-file descriptors under that lock;
+no inspection path retries an authorized Workspace operation.

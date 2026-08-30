@@ -161,6 +161,12 @@ struct AcceptedHandoffJournal: Codable, Equatable {
     let dependentWorkspaceSHA256: String
     let dependentWorkspacePreimage: Data
     let targetFingerprint: String
+    let reconciliationWorkTitle: String?
+    let lifecyclePriorityRepairs: [LifecyclePriorityRepair]?
+    let reconciliationLifecycle: String?
+    let reconciliationPriority: String?
+    let reconciliationPriorityRule: LifecyclePriorityRule?
+    private(set) var reconciliationQueueDisposition: ReconciliationDisposition?
     private(set) var terminalState: OfficeWorkspaceTerminalState?
     private(set) var journalFinalized: Bool
     private(set) var fallbackRecorded: Bool
@@ -178,6 +184,10 @@ struct AcceptedHandoffJournal: Codable, Equatable {
         fallbackRecorded = true
         self.diagnostic = diagnostic
     }
+
+    mutating func acknowledgeReconciliation() { reconciliationQueueDisposition = .confirmed }
+    mutating func markReconciliationCorrected() { reconciliationQueueDisposition = .corrected }
+    mutating func preserveReconciliationDisposition(_ value: ReconciliationDisposition?) { reconciliationQueueDisposition = value }
 }
 
 protocol AcceptedHandoffJournalStore {
@@ -217,28 +227,40 @@ struct ApplicationSupportAcceptedHandoffJournalStore: AcceptedHandoffJournalStor
             throw AcceptedHandoffJournalEnvelopeError.invalid("An initial journal must be unfinalized, nonfallback, and nonterminal.")
         }
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard try matchingURLs(operationID: journal.operationUUID).isEmpty else {
-            throw AcceptedHandoffJournalEnvelopeError.invalid("A journal already exists for the issued operation UUID.")
+        try OfficeJournalAtomicCoordinator.withLock(directory: directory) {
+            guard try matchingURLs(operationID: journal.operationUUID).isEmpty else {
+                throw AcceptedHandoffJournalEnvelopeError.invalid("A journal already exists for the issued operation UUID.")
+            }
+            try writeNewUnchecked(journal)
         }
-        try writeUnchecked(journal)
     }
 
     func update(_ journal: AcceptedHandoffJournal) throws {
         try journal.validateEnvelope(requestedOperationID: journal.operationUUID)
-        guard let durable = try self.journal(operationID: journal.operationUUID) else {
-            throw AcceptedHandoffJournalEnvelopeError.invalid("The bound recovery journal is unavailable for update.")
+        try OfficeJournalAtomicCoordinator.withLock(directory: directory) {
+            let (url, bytes, durable) = try durableSnapshot(operationID: journal.operationUUID)
+            var merged = journal
+            if merged.terminalState != durable.terminalState,
+               merged.reconciliationQueueDisposition != durable.reconciliationQueueDisposition {
+                merged.preserveReconciliationDisposition(durable.reconciliationQueueDisposition)
+            }
+            try merged.validateUpdate(from: durable, requiresFallback: false)
+            try compareAndReplace(merged, expectedBytes: bytes, at: url)
         }
-        try journal.validateUpdate(from: durable, requiresFallback: false)
-        try writeUnchecked(journal)
     }
 
     func recordFallback(_ journal: AcceptedHandoffJournal) throws {
         try journal.validateEnvelope(requestedOperationID: journal.operationUUID)
-        guard let durable = try self.journal(operationID: journal.operationUUID) else {
-            throw AcceptedHandoffJournalEnvelopeError.invalid("The bound recovery journal is unavailable for fallback recording.")
+        try OfficeJournalAtomicCoordinator.withLock(directory: directory) {
+            let (url, bytes, durable) = try durableSnapshot(operationID: journal.operationUUID)
+            var merged = journal
+            if merged.terminalState != durable.terminalState,
+               merged.reconciliationQueueDisposition != durable.reconciliationQueueDisposition {
+                merged.preserveReconciliationDisposition(durable.reconciliationQueueDisposition)
+            }
+            try merged.validateUpdate(from: durable, requiresFallback: true)
+            try compareAndReplace(merged, expectedBytes: bytes, at: url)
         }
-        try journal.validateUpdate(from: durable, requiresFallback: true)
-        try writeUnchecked(journal)
     }
 
     func journal(operationID: UUID) throws -> AcceptedHandoffJournal? {
@@ -293,13 +315,35 @@ struct ApplicationSupportAcceptedHandoffJournalStore: AcceptedHandoffJournalStor
         return value
     }
 
-    private func writeUnchecked(_ journal: AcceptedHandoffJournal) throws {
-        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    private func encoded(_ journal: AcceptedHandoffJournal) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        try DurableReplacement(manager: manager).replace(
-            data: try encoder.encode(journal),
-            at: directory.appending(path: "\(journal.operationUUID.uuidString).json")
+        return try encoder.encode(journal)
+    }
+
+    private func writeNewUnchecked(_ journal: AcceptedHandoffJournal) throws {
+        let url = directory.appending(path: "\(journal.operationUUID.uuidString).json")
+        let data = try encoded(journal)
+        try DurableReplacement(manager: manager).replace(data: data, at: url)
+        guard try OfficeJournalAtomicCoordinator.readRegular(url) == data else {
+            throw AcceptedHandoffJournalEnvelopeError.invalid("The initial durable journal failed exact reload validation.")
+        }
+    }
+
+    private func durableSnapshot(operationID: UUID) throws -> (URL, Data, AcceptedHandoffJournal) {
+        let matches = try matchingURLs(operationID: operationID)
+        guard matches.count == 1, TaskCheckpointUTF8.equal(matches[0].lastPathComponent, "\(operationID.uuidString).json") else {
+            throw AcceptedHandoffJournalEnvelopeError.invalid("The bound recovery journal is unavailable or ambiguous for update.")
+        }
+        let bytes = try OfficeJournalAtomicCoordinator.readRegular(matches[0])
+        let durable = try JSONDecoder().decode(AcceptedHandoffJournal.self, from: bytes)
+        try durable.validateEnvelope(requestedOperationID: operationID)
+        return (matches[0], bytes, durable)
+    }
+
+    private func compareAndReplace(_ journal: AcceptedHandoffJournal, expectedBytes: Data, at url: URL) throws {
+        try OfficeJournalAtomicCoordinator.replaceIfUnchanged(
+            expectedDurableBytes: expectedBytes, proposedBytes: try encoded(journal), at: url, manager: manager
         )
     }
 }
@@ -332,12 +376,39 @@ private extension AcceptedHandoffJournal {
               dependentWorkspaceSHA256 == digest(dependentWorkspacePreimage) else {
             throw AcceptedHandoffJournalEnvelopeError.invalid("UUID, schema, kind, IDs, fixed paths, or bound hashes do not match.")
         }
+        if let repairs = lifecyclePriorityRepairs, !repairs.isEmpty {
+            guard reconciliationWorkTitle?.isEmpty == false,
+                  reconciliationLifecycle != nil,
+                  reconciliationPriority != nil,
+                  reconciliationPriorityRule != nil,
+                  reconciliationQueueDisposition != nil else {
+                throw AcceptedHandoffJournalEnvelopeError.invalid("A composed mirror repair lacks its complete queue envelope.")
+            }
+            if terminalState == nil, reconciliationQueueDisposition != .pending {
+                throw AcceptedHandoffJournalEnvelopeError.invalid("An initial composed mirror repair must enter the pending queue.")
+            }
+        } else if reconciliationQueueDisposition != nil || reconciliationWorkTitle != nil || reconciliationLifecycle != nil || reconciliationPriority != nil || reconciliationPriorityRule != nil {
+            throw AcceptedHandoffJournalEnvelopeError.invalid("An accepted handoff without mirror repairs cannot carry queue metadata.")
+        }
         try validateTerminalFlags()
     }
 
     func validateUpdate(from durable: AcceptedHandoffJournal, requiresFallback: Bool) throws {
         guard immutableEnvelopeEquals(durable) else {
             throw AcceptedHandoffJournalEnvelopeError.invalid("A journal update attempted to substitute an immutable operation-envelope field.")
+        }
+        let dispositionChanged = reconciliationQueueDisposition != durable.reconciliationQueueDisposition
+        if dispositionChanged {
+            guard durable.terminalState?.provesHistoricalCommit == true,
+                  durable.reconciliationQueueDisposition == .pending,
+                  reconciliationQueueDisposition == .confirmed || reconciliationQueueDisposition == .corrected,
+                  terminalState == durable.terminalState,
+                  journalFinalized == durable.journalFinalized,
+                  fallbackRecorded == durable.fallbackRecorded,
+                  diagnostic == durable.diagnostic else {
+                throw AcceptedHandoffJournalEnvelopeError.invalid("An accepted-handoff reconciliation disposition transition is invalid.")
+            }
+            return
         }
         guard let proposedState = terminalState,
               proposedState == OfficeWorkspaceTerminalState.merging(current: durable.terminalState, proposed: proposedState) else {
@@ -376,7 +447,12 @@ private extension AcceptedHandoffJournal {
         TaskCheckpointUTF8.equal(dependentWorkspacePath, other.dependentWorkspacePath) &&
         TaskCheckpointUTF8.equal(dependentWorkspaceSHA256, other.dependentWorkspaceSHA256) &&
         dependentWorkspacePreimage == other.dependentWorkspacePreimage &&
-        TaskCheckpointUTF8.equal(targetFingerprint, other.targetFingerprint)
+        TaskCheckpointUTF8.equal(targetFingerprint, other.targetFingerprint) &&
+        reconciliationWorkTitle == other.reconciliationWorkTitle &&
+        lifecyclePriorityRepairs == other.lifecyclePriorityRepairs &&
+        reconciliationLifecycle == other.reconciliationLifecycle &&
+        reconciliationPriority == other.reconciliationPriority &&
+        reconciliationPriorityRule == other.reconciliationPriorityRule
     }
 
     func validateTerminalFlags() throws {
@@ -421,6 +497,7 @@ private struct AcceptedHandoffPreparedTarget {
     let dependentWorkspaceData: Data
     let evidence: AcceptedHandoffEvidence
     let targetFingerprint: String
+    let mirrorRepair: LifecyclePriorityMirrorRepairPlan
 }
 
 private struct AcceptedHandoffTaskWorkspace {
@@ -723,6 +800,12 @@ struct AcceptedHandoffService {
             dependentWorkspaceSHA256: digest(prepared.dependentWorkspaceData),
             dependentWorkspacePreimage: prepared.dependentWorkspaceData,
             targetFingerprint: prepared.targetFingerprint,
+            reconciliationWorkTitle: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.workTitle,
+            lifecyclePriorityRepairs: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.repairs,
+            reconciliationLifecycle: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.lifecycle,
+            reconciliationPriority: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.priority,
+            reconciliationPriorityRule: prepared.mirrorRepair.repairs.isEmpty ? nil : prepared.mirrorRepair.priorityRule,
+            reconciliationQueueDisposition: prepared.mirrorRepair.repairs.isEmpty ? nil : .pending,
             terminalState: nil, journalFinalized: false, fallbackRecorded: false, diagnostic: nil
         )
         do { try journalStore.persist(journal) }
@@ -950,7 +1033,8 @@ struct AcceptedHandoffService {
         guard digest(dependentData) == request.expectedDependentWorkspaceSHA256 else {
             throw AcceptedHandoffValidationError.hashMismatch("Dependent Workspace SHA-256 does not match the authorized preimage.")
         }
-        let source = try AcceptedHandoffTaskWorkspace(data: sourceData)
+        let mirrorRepair = try LifecyclePriorityMirrorReconciler.task(registryData: registryData, workspaceData: sourceData, taskID: request.sourceID)
+        let source = try AcceptedHandoffTaskWorkspace(data: mirrorRepair.workspaceAfter)
         let dependent = try AcceptedHandoffTaskWorkspace(data: dependentData)
         try source.validateIdentity(taskID: request.sourceID, row: sourceRow)
         try dependent.validateIdentity(taskID: request.dependentID, row: dependentRow)
@@ -976,7 +1060,8 @@ struct AcceptedHandoffService {
             targetFingerprint: targetFingerprint(
                 sourceRow: sourceRow, dependentRow: dependentRow,
                 evidencePath: evidence.relativePath, sourceCommit: request.sourceCommit
-            )
+            ),
+            mirrorRepair: mirrorRepair
         )
     }
 
@@ -990,7 +1075,10 @@ struct AcceptedHandoffService {
         let registry = try TaskRegistryDocument(data: current.registry)
         let sourceRow = try registry.identityRow(taskID: journal.sourceID)
         let dependentRow = try registry.uniqueRow(taskID: journal.dependentID)
-        let before = try AcceptedHandoffTaskWorkspace(data: journal.workspacePreimage)
+        let repairedBase = try LifecyclePriorityMirrorReconciler.task(
+            registryData: current.registry, workspaceData: journal.workspacePreimage, taskID: journal.sourceID
+        ).workspaceAfter
+        let before = try AcceptedHandoffTaskWorkspace(data: repairedBase)
         let after = try AcceptedHandoffTaskWorkspace(data: current.source)
         let dependent = try AcceptedHandoffTaskWorkspace(data: current.dependent)
         try after.validateIdentity(taskID: journal.sourceID, row: sourceRow)
@@ -1301,6 +1389,8 @@ struct AcceptedHandoffService {
         case AcceptedHandoffValidationError.hashMismatch: "hashMismatch"
         case AcceptedHandoffValidationError.invalidInput: "invalidInput"
         case AcceptedHandoffValidationError.targetContractInvalid: "targetContractInvalid"
+        case LifecyclePriorityValidationError.targetContractInvalid: "targetContractInvalid"
+        case LifecyclePriorityValidationError.invalidInput: "invalidInput"
         default: "not-committed"
         }
     }
@@ -2018,6 +2108,7 @@ enum AcceptedHandoffDiscovery {
 enum OfficeWorkspaceInspectionPayload {
     case checkpoint(TaskCheckpointCommandResult)
     case acceptedHandoff(AcceptedHandoffCommandResult)
+    case lifecyclePriority(LifecyclePriorityCommandResult)
 }
 
 protocol OfficeWorkspaceInspecting {
@@ -2027,31 +2118,37 @@ protocol OfficeWorkspaceInspecting {
 struct ServiceBackedOfficeWorkspaceInspector: OfficeWorkspaceInspecting {
     let checkpointService: TaskCheckpointService
     let acceptedHandoffService: AcceptedHandoffService
+    let lifecyclePriorityService: LifecyclePriorityService
+
+    init(
+        checkpointService: TaskCheckpointService,
+        acceptedHandoffService: AcceptedHandoffService,
+        lifecyclePriorityService: LifecyclePriorityService = LifecyclePriorityService()
+    ) {
+        self.checkpointService = checkpointService
+        self.acceptedHandoffService = acceptedHandoffService
+        self.lifecyclePriorityService = lifecyclePriorityService
+    }
 
     func inspect(operationID: UUID, configuration: ProductionsConfiguration) throws -> OfficeWorkspaceInspectionPayload {
-        var checkpointReadError: Error?
+        var readErrors: [String] = []
         do {
             if try checkpointService.journalStore.journal(operationID: operationID) != nil {
                 return .checkpoint(try checkpointService.inspect(operationID: operationID, configuration: configuration))
             }
-        } catch { checkpointReadError = error }
+        } catch { readErrors.append("checkpoint: \(error.localizedDescription)") }
 
         do {
             if try acceptedHandoffService.journalStore.journal(operationID: operationID) != nil {
                 return .acceptedHandoff(try acceptedHandoffService.inspect(operationID: operationID, configuration: configuration))
             }
-        } catch {
-            throw OfficeWorkspaceInspectionDispatchError.invalid(
-                "Neither typed journal reader could validate the supplied operation envelope. " +
-                "Checkpoint reader: \(checkpointReadError?.localizedDescription ?? "no matching journal"); " +
-                "accepted-handoff reader: \(error.localizedDescription)."
-            )
-        }
-        if let checkpointReadError {
-            throw OfficeWorkspaceInspectionDispatchError.invalid(
-                "The checkpoint journal reader rejected the supplied operation envelope: \(checkpointReadError.localizedDescription)"
-            )
-        }
+        } catch { readErrors.append("accepted-handoff: \(error.localizedDescription)") }
+        do {
+            if try lifecyclePriorityService.journalStore.journal(operationID: operationID) != nil {
+                return .lifecyclePriority(try lifecyclePriorityService.inspect(operationID: operationID, configuration: configuration))
+            }
+        } catch { readErrors.append("lifecycle-priority: \(error.localizedDescription)") }
+        if !readErrors.isEmpty { throw OfficeWorkspaceInspectionDispatchError.invalid("No typed reader accepted the supplied journal envelope. " + readErrors.joined(separator: "; ")) }
         throw OfficeWorkspaceInspectionDispatchError.invalid("No Office Workspace journal exists for \(operationID.uuidString).")
     }
 }
@@ -2061,18 +2158,21 @@ struct ApplicationSupportOfficeWorkspaceInspector: OfficeWorkspaceInspecting {
     let directory: URL
     let checkpointService: TaskCheckpointService
     let acceptedHandoffService: AcceptedHandoffService
+    let lifecyclePriorityService: LifecyclePriorityService
 
     init(
         manager: FileManager = .default,
         directory: URL? = nil,
         checkpointService: TaskCheckpointService = TaskCheckpointService(),
-        acceptedHandoffService: AcceptedHandoffService = AcceptedHandoffService()
+        acceptedHandoffService: AcceptedHandoffService = AcceptedHandoffService(),
+        lifecyclePriorityService: LifecyclePriorityService = LifecyclePriorityService()
     ) {
         self.manager = manager
         self.directory = directory ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
         self.checkpointService = checkpointService
         self.acceptedHandoffService = acceptedHandoffService
+        self.lifecyclePriorityService = lifecyclePriorityService
     }
 
     func inspect(operationID: UUID, configuration: ProductionsConfiguration) throws -> OfficeWorkspaceInspectionPayload {
@@ -2092,6 +2192,7 @@ struct ApplicationSupportOfficeWorkspaceInspector: OfficeWorkspaceInspecting {
         switch kind {
         case "task-checkpoint": return .checkpoint(try checkpointService.inspect(operationID: operationID, configuration: configuration))
         case "accepted-handoff": return .acceptedHandoff(try acceptedHandoffService.inspect(operationID: operationID, configuration: configuration))
+        case "lifecycle-priority-reconciliation": return .lifecyclePriority(try lifecyclePriorityService.inspect(operationID: operationID, configuration: configuration))
         default: throw OfficeWorkspaceInspectionDispatchError.invalid("Unsupported Office Workspace journal kind \(kind).")
         }
     }

@@ -190,6 +190,15 @@ struct Memento: Identifiable, Equatable {
     let extendedPayloadPath: String?
     let extendedPayloadContent: String?
 }
+struct ReconciliationQueueItem: Identifiable, Equatable {
+    let operationID: UUID
+    let workID: String
+    let workTitle: String
+    let fields: [String]
+    let summary: String
+    let occurred: Date
+    var id: UUID { operationID }
+}
 struct ProductionsState: Equatable {
     let configuration: ProductionsConfiguration
     let inbox: [FlowItem]
@@ -200,19 +209,30 @@ struct ProductionsState: Equatable {
     let canvas: [CanvasEvent]
     let crumbs: [Crumb]
     let mementos: [Memento]
+    let reconciliations: [ReconciliationQueueItem]
     let issues: [ProductionsIssue]
 
-    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], departments: [DepartmentRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], issues: [ProductionsIssue]) {
+    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], departments: [DepartmentRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], reconciliations: [ReconciliationQueueItem] = [], issues: [ProductionsIssue]) {
         self.configuration = configuration; self.inbox = inbox; self.processing = processing
         self.work = work; self.products = products; self.departments = departments; self.canvas = canvas; self.crumbs = crumbs
         self.mementos = mementos; self.issues = issues
+        self.reconciliations = reconciliations
     }
     var canvasCurrentIDs: Set<String> { Set(canvas.sorted { $0.sequence < $1.sequence }.reduce(into: [String: String]()) { if $1.event == "Placed" || $1.event == "Cleared" { $0[$1.workID] = $1.event } }.filter { $0.value == "Placed" }.map(\.key)) }
 }
 
 struct ProductionsLoader {
     let reader: any ProductionsReading
+    let reconciliationResolver: any ReconciliationQueueResolving
     private let dateFormatter = ISO8601DateFormatter()
+
+    init(
+        reader: any ProductionsReading,
+        reconciliationResolver: any ReconciliationQueueResolving = ApplicationSupportReconciliationQueueResolver()
+    ) {
+        self.reader = reader
+        self.reconciliationResolver = reconciliationResolver
+    }
 
     func load(configuration: ProductionsConfiguration) -> ProductionsState {
         var issues: [ProductionsIssue] = []
@@ -235,7 +255,22 @@ struct ProductionsLoader {
         let validTargets = Set(workByID.keys).union(flow.filter { $0.stage == "Processing" }.map(\.id))
         let crumbs = parseCrumbs(table(at: .crumbs, configuration: validated, required: ["Crumb ID", "Kind", "Target", "Priority", "Summary", "Created", "Location"], issues: &issues), targets: validTargets, configuration: validated, issues: &issues)
         let mementos = parseMementos(table(at: .mementos, configuration: validated, required: ["Memento ID", "Target", "Summary", "Resume point", "Created", "Location"], issues: &issues), work: workByID, processing: flow.filter { $0.stage == "Processing" }, crumbs: crumbs, configuration: validated, issues: &issues)
-        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, departments: departments, canvas: canvas, crumbs: crumbs, mementos: mementos, issues: issues)
+        let reconciliations: [ReconciliationQueueItem]
+        do {
+            reconciliations = try reconciliationResolver.pendingEntries(
+                productionsRootPath: validated.productionsRootPath, now: Date()
+            ).map { entry in
+                let fields = entry.repairs.map(\.field)
+                let summary = entry.repairs.map { "\($0.field): \($0.workspaceValuesBefore.joined(separator: ", ")) → \($0.chosenValue) (\($0.rule))" }.joined(separator: "; ")
+                return ReconciliationQueueItem(operationID: entry.operationUUID, workID: entry.workID,
+                                               workTitle: entry.workTitle, fields: fields, summary: summary,
+                                               occurred: entry.occurredAt)
+            }
+        } catch {
+            reconciliations = []
+            issues.append(.malformed("Administrative reconciliation queue: \(error.localizedDescription)"))
+        }
+        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, departments: departments, canvas: canvas, crumbs: crumbs, mementos: mementos, reconciliations: reconciliations, issues: issues)
     }
 
     private func validatePath(_ path: ProductionsPath, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) { let url = configuration.url(path.rawValue, directory: path == .inbox || path == .processing); if !reader.exists(at: url) { issues.append(.missing(path.rawValue)) } else if !reader.isReadable(at: url) { issues.append(.unreadable(path.rawValue)) } }

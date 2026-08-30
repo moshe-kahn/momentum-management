@@ -4,9 +4,19 @@ import XCTest
 
 final class ProductionsDashboardPresentationTests: XCTestCase {
     func testNavigationSectionsUseReviewedIntakeFocusAndBrowseModes() {
-        XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .processing])
+        XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .reconciliations, .processing])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .focus), [.canvas, .crumbs, .mementos, .priorityWork])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .browse), [.workItems, .plans])
+    }
+
+    func testPendingReconciliationIsVisibleBesideInboxWithAccessibleOperationEvidence() throws {
+        let operationID = UUID(uuidString: "12345678-1234-4234-8234-123456789ABC")!
+        let entry = ReconciliationQueueItem(operationID: operationID, workID: "TASK-000001", workTitle: "Office task", fields: ["priority"], summary: "priority: High → Medium (registry)", occurred: Date(timeIntervalSince1970: 1_787_000_000))
+        let item = try XCTUnwrap(ProductionsDashboardPresentation.items(for: .reconciliations, in: richState(reconciliations: [entry])).first)
+        XCTAssertEqual(item.targetID, "TASK-000001")
+        XCTAssertTrue(item.metadata.contains("Pending owner confirmation"))
+        XCTAssertTrue(item.metadata.contains(operationID.uuidString))
+        XCTAssertTrue(ProductionsPresentationAccessibility.rowLabel(item).contains("priority: High → Medium"))
     }
 
     func testWorkItemsAndPlansSeparateEveryCanonicalKindWithoutInventingProductDepartment() throws {
@@ -233,7 +243,7 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertNil(pasteboard.text, "Stale package bytes must never reach the pasteboard.")
     }
 
-    private func richState() -> ProductionsState {
+    private func richState(reconciliations: [ReconciliationQueueItem] = []) -> ProductionsState {
         let task = work("TASK-000001", kind: .task, title: "Office task", lifecycle: "Active / Current", priority: "High", department: "Office")
         let idea = work("IDEA-000001", kind: .idea, title: "Studio idea", lifecycle: "Open", priority: "Highest", department: "Studio")
         let project = work("PROJ-000001", kind: .project, title: "Office project", lifecycle: "Active / Current", priority: "Medium", department: "Office")
@@ -259,6 +269,7 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
             canvas: [CanvasEvent(occurred: Date(timeIntervalSince1970: 1), workID: task.id, event: "Placed", reason: "Focus", context: "Test", sequence: 0)],
             crumbs: crumbs,
             mementos: mementos,
+            reconciliations: reconciliations,
             issues: []
         )
     }

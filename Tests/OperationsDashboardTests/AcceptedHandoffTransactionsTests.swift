@@ -816,6 +816,78 @@ final class AcceptedHandoffTransactionsTests: XCTestCase {
         XCTAssertTrue(result.diagnostic?.contains("Do not retry automatically.") == true)
     }
 
+    func testAcceptedHandoffComposesRegistryAuthoritativeMirrorRepairAndDurableQueue() throws {
+        let fixture = try HandoffFixture(); defer { fixture.remove() }
+        try fixture.replace(in: fixture.sourceURL, "Type: Task", with: "Type: Task\nPriority: Medium")
+        let recovery = URL(fileURLWithPath: "/private/tmp/HandoffMirrorRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let handoffStore = ApplicationSupportAcceptedHandoffJournalStore(directory: recovery)
+        let accepted = AcceptedHandoffService(
+            journalStore: handoffStore, contractValidator: AcceptingHandoffValidator(),
+            makeOperationID: { self.operationID }, discover: { _, _, _ in [] }
+        )
+        let result = try accepted.perform(request: fixture.request(), configuration: fixture.configuration)
+        XCTAssertEqual(result.outcome, "committed")
+        XCTAssertTrue(String(decoding: try fixture.read(fixture.sourceURL), as: UTF8.self).contains("Priority: High"))
+        let durable = try XCTUnwrap(handoffStore.journal(operationID: operationID))
+        XCTAssertEqual(durable.lifecyclePriorityRepairs?.map(\.field), ["priority"])
+        XCTAssertEqual(durable.reconciliationQueueDisposition, .pending)
+
+        let queue = LifecyclePriorityService(
+            journalStore: ApplicationSupportLifecyclePriorityJournalStore(directory: recovery),
+            contractValidator: AcceptingHandoffValidator()
+        )
+        XCTAssertEqual(try queue.pendingEntries(configuration: fixture.configuration).map(\.operationUUID), [operationID])
+        XCTAssertEqual(try queue.acknowledge(operationID: operationID, configuration: fixture.configuration).classification, "acknowledged")
+        XCTAssertTrue(try queue.pendingEntries(configuration: fixture.configuration).isEmpty)
+    }
+
+    func testLifecycleCorrectionCanResolveAcceptedHandoffOriginQueueEntry() throws {
+        let fixture = try HandoffFixture(); defer { fixture.remove() }
+        try fixture.replace(in: fixture.sourceURL, "Type: Task", with: "Type: Task\nPriority: Medium")
+        let recovery = URL(fileURLWithPath: "/private/tmp/HandoffCorrectionQueue-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let handoffStore = ApplicationSupportAcceptedHandoffJournalStore(directory: recovery)
+        let accepted = AcceptedHandoffService(
+            journalStore: handoffStore, contractValidator: AcceptingHandoffValidator(),
+            makeOperationID: { self.operationID }, discover: { _, _, _ in [] }
+        )
+        _ = try accepted.perform(request: fixture.request(), configuration: fixture.configuration)
+
+        let correctionID = UUID(uuidString: "B2345678-1234-4234-8234-123456789ABC")!
+        let lifecycle = LifecyclePriorityService(
+            journalStore: ApplicationSupportLifecyclePriorityJournalStore(directory: recovery),
+            contractValidator: AcceptingHandoffValidator(), makeOperationID: { correctionID }
+        )
+        let correction = LifecyclePriorityRequest(
+            workID: "TASK-0066", expectedRegistrySHA256: digest(try fixture.read(fixture.registryURL)),
+            expectedWorkspaceSHA256: digest(try fixture.read(fixture.sourceURL)), priorityRule: .registryAuthoritative,
+            desiredLifecycle: nil, desiredPriority: "Low", correctsOperation: operationID
+        )
+        let preview = try lifecycle.preview(request: correction, configuration: fixture.configuration)
+        let result = try lifecycle.perform(request: correction, confirmationToken: preview.confirmationToken, configuration: fixture.configuration)
+        XCTAssertEqual(result.outcome, "committed", result.diagnostic ?? "")
+        XCTAssertEqual(try handoffStore.journal(operationID: operationID)?.reconciliationQueueDisposition, .corrected)
+        XCTAssertTrue(try lifecycle.pendingEntries(configuration: fixture.configuration).isEmpty)
+    }
+
+    func testAcceptedHandoffQueueRejectsMetadataNotDerivedFromBoundImages() throws {
+        let fixture = try HandoffFixture(); defer { fixture.remove() }
+        try fixture.replace(in: fixture.sourceURL, "Type: Task", with: "Type: Task\nPriority: Medium")
+        let recovery = URL(fileURLWithPath: "/private/tmp/HandoffMalformedQueue-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let store = ApplicationSupportAcceptedHandoffJournalStore(directory: recovery)
+        _ = try AcceptedHandoffService(journalStore: store, contractValidator: AcceptingHandoffValidator(),
+                                       makeOperationID: { self.operationID }, discover: { _, _, _ in [] })
+            .perform(request: fixture.request(), configuration: fixture.configuration)
+        let url = recovery.appending(path: "\(operationID.uuidString).json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        object["reconciliationPriority"] = "Highest"
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+        XCTAssertThrowsError(try ApplicationSupportReconciliationQueueResolver(directory: recovery)
+            .pendingEntries(productionsRootPath: fixture.root.path, now: Date()))
+    }
+
     private func service(
         journal: any AcceptedHandoffJournalStore = HandoffMemoryJournal(),
         replacer: any AtomicFileReplacing = DurableReplacement(),

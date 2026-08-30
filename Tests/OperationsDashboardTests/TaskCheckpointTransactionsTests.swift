@@ -471,6 +471,10 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
             { try $0.replace(path: "Office/Registry/Ideas.md", old: "| IDEA-", new: "| BAD-", firstOnly: true) },
             { try $0.replace(path: "Office/Registry/Projects.md", old: "| PROJ-", new: "| BAD-", firstOnly: true) },
             { try $0.replace(path: "Office/Registry/Initiatives.md", old: "| INIT-", new: "| BAD-", firstOnly: true) },
+            { try $0.append(path: "Office/Registry/Tasks.md", text: "\n| IDEA-9999 | hidden wrong-kind row |\n") },
+            { try $0.append(path: "Office/Registry/Ideas.md", text: "\n| malformed | hidden fragment |\n") },
+            { try $0.append(path: "Office/Registry/Projects.md", text: "\n  | malformed | hidden fragment |\n") },
+            { try $0.append(path: "Office/Registry/Initiatives.md", text: "\n| TASK-9999 | hidden wrong-kind row |\n") },
             { try $0.replace(path: "Warehouse/Reference/Document Registry.md", old: "Revision date: 2026-08-29", new: "Revision date: 2026-08-28", firstOnly: true) },
             { try $0.replace(path: "Office/Registry/Tasks.md", old: "| --- | --- |", new: "| -- | --- |", firstOnly: true) },
             { try $0.replace(path: "Office/Registry/Ideas.md", old: "TASK-0017@done-complete", new: "TASK-0017@accepted-handoff:wrong", firstOnly: true) },
@@ -1059,6 +1063,215 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
         }
     }
 
+    func testCheckpointComposesRegistryAuthoritativeMirrorRepairAndDurableQueue() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CheckpointMirrorRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let checkpointStore = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        let checkpoint = TaskCheckpointService(
+            journalStore: checkpointStore, contractValidator: AcceptingV112Validator(),
+            now: { self.date }, makeOperationID: { self.operationID }
+        )
+        let result = try checkpoint.perform(request: fixture.request(), configuration: fixture.configuration)
+        XCTAssertEqual(result.outcome, "committed")
+        XCTAssertTrue(String(decoding: try fixture.read(fixture.workspaceURL), as: UTF8.self).contains("Priority: Medium"))
+        let durable = try XCTUnwrap(checkpointStore.journal(operationID: operationID))
+        XCTAssertEqual(durable.lifecyclePriorityRepairs?.map(\.field), ["priority"])
+        XCTAssertEqual(durable.reconciliationQueueDisposition, .pending)
+
+        let queue = LifecyclePriorityService(
+            journalStore: ApplicationSupportLifecyclePriorityJournalStore(directory: recovery),
+            contractValidator: AcceptingV112Validator()
+        )
+        XCTAssertEqual(try queue.pendingEntries(configuration: fixture.configuration).map(\.operationUUID), [operationID])
+        XCTAssertEqual(try queue.acknowledge(operationID: operationID, configuration: fixture.configuration).classification, "acknowledged")
+        XCTAssertTrue(try queue.pendingEntries(configuration: fixture.configuration).isEmpty)
+    }
+
+    func testCheckpointQueueAcknowledgementPreservesOriginatingFallbackFlags() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CheckpointFallbackQueue-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let store = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        let checkpoint = TaskCheckpointService(journalStore: store, contractValidator: AcceptingV112Validator(),
+                                               now: { self.date }, makeOperationID: { self.operationID })
+        _ = try checkpoint.perform(request: fixture.request(), configuration: fixture.configuration)
+        var journal = try XCTUnwrap(store.journal(operationID: operationID))
+        journal.markFallback(.journalFinalizationFailedCommittedAndCurrent, diagnostic: "Synthetic durable fallback proof.")
+        try store.recordFallback(journal)
+
+        let queue = LifecyclePriorityService(
+            journalStore: ApplicationSupportLifecyclePriorityJournalStore(directory: recovery),
+            contractValidator: AcceptingV112Validator()
+        )
+        let acknowledged = try queue.acknowledge(operationID: operationID, configuration: fixture.configuration)
+        XCTAssertFalse(acknowledged.journalFinalized)
+        XCTAssertTrue(acknowledged.fallbackRecorded)
+        XCTAssertTrue(acknowledged.historicalCommitProven)
+        XCTAssertEqual(try store.journal(operationID: operationID)?.reconciliationQueueDisposition, .confirmed)
+    }
+
+    func testCheckpointQueueRejectsMetadataNotDerivedFromBoundImages() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CheckpointMalformedQueue-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let store = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        _ = try TaskCheckpointService(journalStore: store, contractValidator: AcceptingV112Validator(),
+                                      now: { self.date }, makeOperationID: { self.operationID })
+            .perform(request: fixture.request(), configuration: fixture.configuration)
+        let url = recovery.appending(path: "\(operationID.uuidString).json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        object["reconciliationWorkTitle"] = "Substituted queue title"
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url)
+        XCTAssertThrowsError(try ApplicationSupportReconciliationQueueResolver(directory: recovery)
+            .pendingEntries(productionsRootPath: fixture.root.path, now: date))
+    }
+
+    func testLifecycleCorrectionCanResolveCheckpointOriginQueueEntry() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CheckpointCorrectionQueue-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let checkpointStore = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        let checkpoint = TaskCheckpointService(journalStore: checkpointStore, contractValidator: AcceptingV112Validator(),
+                                               now: { self.date }, makeOperationID: { self.operationID })
+        _ = try checkpoint.perform(request: fixture.request(), configuration: fixture.configuration)
+
+        let correctionID = UUID(uuidString: "A2345678-1234-4234-8234-123456789ABC")!
+        let lifecycleStore = ApplicationSupportLifecyclePriorityJournalStore(directory: recovery)
+        let lifecycle = LifecyclePriorityService(journalStore: lifecycleStore, contractValidator: AcceptingV112Validator(),
+                                                 now: { self.date }, makeOperationID: { correctionID })
+        let request = LifecyclePriorityRequest(
+            workID: "TASK-0076", expectedRegistrySHA256: sha256(try fixture.read(fixture.registryURL)),
+            expectedWorkspaceSHA256: sha256(try fixture.read(fixture.workspaceURL)), priorityRule: .registryAuthoritative,
+            desiredLifecycle: nil, desiredPriority: "Low", correctsOperation: operationID
+        )
+        let preview = try lifecycle.preview(request: request, configuration: fixture.configuration)
+        let result = try lifecycle.perform(request: request, confirmationToken: preview.confirmationToken, configuration: fixture.configuration)
+        XCTAssertEqual(result.outcome, "committed", result.diagnostic ?? "")
+        XCTAssertEqual(try checkpointStore.journal(operationID: operationID)?.reconciliationQueueDisposition, .corrected)
+        XCTAssertTrue(try lifecycle.pendingEntries(configuration: fixture.configuration).isEmpty)
+    }
+
+    func testCommittedCorrectionRecoveryConsumesCheckpointEntryAfterQueueUpdateFailure() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CheckpointCorrectionRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let checkpointStore = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        _ = try TaskCheckpointService(journalStore: checkpointStore, contractValidator: AcceptingV112Validator(),
+                                      now: { self.date }, makeOperationID: { self.operationID })
+            .perform(request: fixture.request(), configuration: fixture.configuration)
+
+        let correctionID = UUID(uuidString: "C2345678-1234-4234-8234-123456789ABC")!
+        let lifecycleStore = ApplicationSupportLifecyclePriorityJournalStore(directory: recovery)
+        let failingResolver = FailOnceCorrectionResolver(base: ApplicationSupportReconciliationQueueResolver(directory: recovery))
+        let lifecycle = LifecyclePriorityService(journalStore: lifecycleStore, queueResolver: failingResolver,
+                                                 contractValidator: AcceptingV112Validator(), now: { self.date },
+                                                 makeOperationID: { correctionID })
+        let request = LifecyclePriorityRequest(
+            workID: "TASK-0076", expectedRegistrySHA256: sha256(try fixture.read(fixture.registryURL)),
+            expectedWorkspaceSHA256: sha256(try fixture.read(fixture.workspaceURL)), priorityRule: .registryAuthoritative,
+            desiredLifecycle: nil, desiredPriority: "Low", correctsOperation: operationID
+        )
+        let preview = try lifecycle.preview(request: request, configuration: fixture.configuration)
+        let committed = try lifecycle.perform(request: request, confirmationToken: preview.confirmationToken, configuration: fixture.configuration)
+        XCTAssertEqual(committed.outcome, "committed-with-queue-failure")
+        XCTAssertEqual(try checkpointStore.journal(operationID: operationID)?.reconciliationQueueDisposition, .pending)
+
+        let recovered = LifecyclePriorityService(journalStore: lifecycleStore, contractValidator: AcceptingV112Validator())
+        XCTAssertTrue(try recovered.pendingEntries(configuration: fixture.configuration).isEmpty)
+        XCTAssertEqual(try checkpointStore.journal(operationID: operationID)?.reconciliationQueueDisposition, .corrected)
+    }
+
+    func testCorrectionRecoveryPlansAllSemanticsBeforeChangingPriorDisposition() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CheckpointRecoveryPlan-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let checkpointStore = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        _ = try TaskCheckpointService(journalStore: checkpointStore, contractValidator: AcceptingV112Validator(),
+                                      now: { self.date }, makeOperationID: { self.operationID })
+            .perform(request: fixture.request(), configuration: fixture.configuration)
+        let correctionID = UUID(uuidString: "D2345678-1234-4234-8234-123456789ABC")!
+        let lifecycleStore = ApplicationSupportLifecyclePriorityJournalStore(directory: recovery)
+        let failingResolver = FailOnceCorrectionResolver(base: ApplicationSupportReconciliationQueueResolver(directory: recovery))
+        let lifecycle = LifecyclePriorityService(journalStore: lifecycleStore, queueResolver: failingResolver,
+                                                 contractValidator: AcceptingV112Validator(), now: { self.date },
+                                                 makeOperationID: { correctionID })
+        let request = LifecyclePriorityRequest(
+            workID: "TASK-0076", expectedRegistrySHA256: sha256(try fixture.read(fixture.registryURL)),
+            expectedWorkspaceSHA256: sha256(try fixture.read(fixture.workspaceURL)), priorityRule: .registryAuthoritative,
+            desiredLifecycle: nil, desiredPriority: "Low", correctsOperation: operationID
+        )
+        let preview = try lifecycle.preview(request: request, configuration: fixture.configuration)
+        XCTAssertEqual(try lifecycle.perform(request: request, confirmationToken: preview.confirmationToken,
+                                             configuration: fixture.configuration).outcome, "committed-with-queue-failure")
+        let correctionURL = recovery.appending(path: "\(correctionID.uuidString).json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: correctionURL)) as? [String: Any])
+        object["registryPath"] = "Office/Registry/Ideas.md"
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: correctionURL)
+
+        XCTAssertThrowsError(try ApplicationSupportReconciliationQueueResolver(directory: recovery)
+            .pendingEntries(productionsRootPath: fixture.root.path, now: date))
+        XCTAssertEqual(try checkpointStore.journal(operationID: operationID)?.reconciliationQueueDisposition, .pending,
+                       "A malformed correction must not partially mutate its prior entry.")
+    }
+
+    func testCorrectionReservationPreventsConcurrentAcknowledgement() throws {
+        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        try fixture.replaceWorkspace("Type: Task", with: "Type: Task\nPriority: High")
+        let recovery = URL(fileURLWithPath: "/private/tmp/CorrectionReservation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let checkpointStore = ApplicationSupportTaskCheckpointJournalStore(directory: recovery)
+        _ = try TaskCheckpointService(journalStore: checkpointStore, contractValidator: AcceptingV112Validator(),
+                                      now: { self.date }, makeOperationID: { self.operationID })
+            .perform(request: fixture.request(), configuration: fixture.configuration)
+        let correctionID = UUID(uuidString: "E2345678-1234-4234-8234-123456789ABC")!
+        let lifecycleStore = ApplicationSupportLifecyclePriorityJournalStore(directory: recovery)
+        let blockingStore = BlockingCorrectionJournalStore(base: lifecycleStore)
+        let resolver = ApplicationSupportReconciliationQueueResolver(directory: recovery)
+        let lifecycle = LifecyclePriorityService(journalStore: blockingStore, queueResolver: resolver,
+                                                 contractValidator: AcceptingV112Validator(), now: { self.date },
+                                                 makeOperationID: { correctionID })
+        let request = LifecyclePriorityRequest(
+            workID: "TASK-0076", expectedRegistrySHA256: sha256(try fixture.read(fixture.registryURL)),
+            expectedWorkspaceSHA256: sha256(try fixture.read(fixture.workspaceURL)), priorityRule: .registryAuthoritative,
+            desiredLifecycle: nil, desiredPriority: "Low", correctsOperation: operationID
+        )
+        let preview = try lifecycle.preview(request: request, configuration: fixture.configuration)
+        let results = CorrectionRaceResults()
+        let group = DispatchGroup()
+        let configuration = fixture.configuration
+        let priorID = operationID
+        group.enter()
+        DispatchQueue.global().async {
+            defer { group.leave() }
+            do { results.correction = try lifecycle.perform(request: request, confirmationToken: preview.confirmationToken, configuration: configuration) }
+            catch { results.correctionError = error }
+        }
+        XCTAssertEqual(blockingStore.persisted.wait(timeout: .now() + 5), .success)
+        group.enter()
+        DispatchQueue.global().async {
+            defer { group.leave() }
+            do {
+                results.acknowledgement = try LifecyclePriorityService(
+                    journalStore: lifecycleStore, contractValidator: AcceptingV112Validator()
+                ).acknowledge(operationID: priorID, configuration: configuration)
+            } catch { results.acknowledgementError = error }
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        blockingStore.proceed.signal()
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        XCTAssertNil(results.correctionError)
+        XCTAssertEqual(results.correction?.outcome, "committed")
+        XCTAssertNotNil(results.acknowledgementError)
+        XCTAssertEqual(try checkpointStore.journal(operationID: operationID)?.reconciliationQueueDisposition, .corrected)
+    }
+
     private func service(
         journal: CheckpointMemoryJournal = CheckpointMemoryJournal(),
         replacer: (any AtomicFileReplacing)? = nil,
@@ -1110,6 +1323,62 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
         XCTAssertTrue(journal.values.isEmpty)
         XCTAssertEqual(try fixture.snapshot(), before)
     }
+}
+
+private final class FailOnceCorrectionResolver: ReconciliationQueueResolving {
+    let base: ApplicationSupportReconciliationQueueResolver
+    private var failed = false
+    init(base: ApplicationSupportReconciliationQueueResolver) { self.base = base }
+    func resolve(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord {
+        try base.resolve(operationID: operationID, productionsRootPath: productionsRootPath)
+    }
+    func pendingEntries(productionsRootPath: String, now: Date) throws -> [LifecyclePriorityQueueEntry] {
+        try base.pendingEntries(productionsRootPath: productionsRootPath, now: now)
+    }
+    func acknowledge(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord {
+        try base.acknowledge(operationID: operationID, productionsRootPath: productionsRootPath)
+    }
+    func markCorrected(operationID: UUID, correctedBy: UUID, productionsRootPath: String, workID: String) throws {
+        if !failed { failed = true; throw CocoaError(.fileWriteUnknown) }
+        try base.markCorrected(operationID: operationID, correctedBy: correctedBy, productionsRootPath: productionsRootPath, workID: workID)
+    }
+    func recoverCommittedCorrections(productionsRootPath: String) throws {
+        try base.recoverCommittedCorrections(productionsRootPath: productionsRootPath)
+    }
+    func reserveCorrection(operationID: UUID, productionsRootPath: String, workID: String) throws -> AnyObject {
+        try base.reserveCorrection(operationID: operationID, productionsRootPath: productionsRootPath, workID: workID)
+    }
+}
+
+private final class BlockingCorrectionJournalStore: LifecyclePriorityJournalStore, @unchecked Sendable {
+    let base: ApplicationSupportLifecyclePriorityJournalStore
+    let persisted = DispatchSemaphore(value: 0)
+    let proceed = DispatchSemaphore(value: 0)
+    init(base: ApplicationSupportLifecyclePriorityJournalStore) { self.base = base }
+    func persist(_ journal: LifecyclePriorityJournal) throws {
+        try base.persist(journal)
+        persisted.signal()
+        guard proceed.wait(timeout: .now() + 10) == .success else { throw CocoaError(.fileWriteUnknown) }
+    }
+    func update(_ journal: LifecyclePriorityJournal) throws { try base.update(journal) }
+    func recordFallback(_ journal: LifecyclePriorityJournal) throws { try base.recordFallback(journal) }
+    func journal(operationID: UUID) throws -> LifecyclePriorityJournal? { try base.journal(operationID: operationID) }
+    func all(productionsRootPath: String) throws -> [LifecyclePriorityJournal] { try base.all(productionsRootPath: productionsRootPath) }
+    func incomplete() throws -> [LifecyclePriorityJournal] { try base.incomplete() }
+    func pending(productionsRootPath: String) throws -> [LifecyclePriorityJournal] { try base.pending(productionsRootPath: productionsRootPath) }
+}
+
+private final class CorrectionRaceResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _correction: LifecyclePriorityCommandResult?
+    private var _acknowledgement: LifecyclePriorityCommandResult?
+    private var _correctionError: Error?
+    private var _acknowledgementError: Error?
+    var correction: LifecyclePriorityCommandResult? { get { locked { _correction } } set { locked { _correction = newValue } } }
+    var acknowledgement: LifecyclePriorityCommandResult? { get { locked { _acknowledgement } } set { locked { _acknowledgement = newValue } } }
+    var correctionError: Error? { get { locked { _correctionError } } set { locked { _correctionError = newValue } } }
+    var acknowledgementError: Error? { get { locked { _acknowledgementError } } set { locked { _acknowledgementError = newValue } } }
+    private func locked<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
 }
 
 private struct AcceptingV112Validator: OfficeV112ContractValidating {
@@ -1178,6 +1447,12 @@ private extension TaskCheckpointJournal {
             workspacePreimage: workspacePreimage, workspaceSHA256ExpectedAfter: workspaceSHA256ExpectedAfter,
             workspaceExpectedAfter: workspaceExpectedAfter, targetFingerprint: targetFingerprint,
             acceptedEvidence: acceptedEvidence, nextStep: nextStep, lastValidatedState: lastValidatedState,
+            reconciliationWorkTitle: reconciliationWorkTitle,
+            lifecyclePriorityRepairs: lifecyclePriorityRepairs,
+            reconciliationLifecycle: reconciliationLifecycle,
+            reconciliationPriority: reconciliationPriority,
+            reconciliationPriorityRule: reconciliationPriorityRule,
+            reconciliationQueueDisposition: reconciliationQueueDisposition,
             terminalState: nil, journalFinalized: false, fallbackRecorded: false, diagnostic: nil
         )
         copy.transition(to: state, diagnostic: nil, finalized: true)
@@ -1251,7 +1526,7 @@ private final class NormalizationEquivalentDirectory {
     func remove() { try? manager.removeItem(at: canonicalURL) }
 }
 
-private final class CheckpointFixture {
+private final class CheckpointFixture: @unchecked Sendable {
     let root: URL
     private let manager = FileManager.default
     let existingEvidence: Bool

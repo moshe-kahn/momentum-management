@@ -3,6 +3,37 @@ import XCTest
 @testable import OperationsDashboard
 
 final class ProductionsReadOnlyTests: XCTestCase {
+    func testUnifiedReconciliationQueueFeedsReadOnlyDashboardLoader() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let operation = UUID(uuidString: "92345678-1234-4234-8234-123456789ABC")!
+        let resolver = ReadOnlyQueueResolver(entries: [
+            LifecyclePriorityQueueEntry(
+                operationUUID: operation, workID: "TASK-000001", workTitle: "Registered Task",
+                occurredAt: Date(timeIntervalSince1970: 1_788_000_000), ageSeconds: 10,
+                repairs: [.init(field: "priority", registryValueBefore: "Medium", workspaceValuesBefore: ["High"],
+                                chosenValue: "Medium", rule: "registry", provenance: "owner-authorized hash-bound Registry decision")],
+                disposition: .pending, journalFinalized: false, fallbackRecorded: true, historicalCommitProven: true
+            )
+        ])
+
+        let state = ProductionsLoader(reader: LocalFileSystem(), reconciliationResolver: resolver)
+            .load(configuration: fixture.configuration)
+
+        XCTAssertEqual(state.reconciliations.map(\.operationID), [operation])
+        XCTAssertEqual(state.reconciliations.map(\.workID), ["TASK-000001"])
+        XCTAssertFalse(state.issues.contains { $0.message.contains("Administrative reconciliation queue") })
+    }
+
+    func testUnifiedQueueFailureSurfacesBlockingDashboardIssue() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let state = ProductionsLoader(reader: LocalFileSystem(), reconciliationResolver: FailingReadOnlyQueueResolver())
+            .load(configuration: fixture.configuration)
+        XCTAssertTrue(state.reconciliations.isEmpty)
+        XCTAssertTrue(state.issues.contains { $0.message.contains("Administrative reconciliation queue") && $0.message.contains("malformed typed journal") })
+    }
+
     func testCanonicalCommaBearingCoreRecordFieldKeyRemainsDistinct() throws {
         let record = try WorkspaceMarkdown.parse("""
         # TASK-000001
@@ -291,6 +322,24 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertTrue(state.issues.contains { if case .unresolved = $0 { true } else { false } })
         XCTAssertTrue(state.issues.contains { if case .duplicate = $0 { true } else { false } })
     }
+}
+
+private struct ReadOnlyQueueResolver: ReconciliationQueueResolving {
+    let entries: [LifecyclePriorityQueueEntry]
+    func resolve(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord { throw CocoaError(.fileReadUnknown) }
+    func pendingEntries(productionsRootPath: String, now: Date) throws -> [LifecyclePriorityQueueEntry] { entries }
+    func acknowledge(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord { throw CocoaError(.fileWriteNoPermission) }
+    func markCorrected(operationID: UUID, correctedBy: UUID, productionsRootPath: String, workID: String) throws { throw CocoaError(.fileWriteNoPermission) }
+    func recoverCommittedCorrections(productionsRootPath: String) throws {}
+}
+
+private struct FailingReadOnlyQueueResolver: ReconciliationQueueResolving {
+    private var error: ProductionsConfigurationError { .malformed("malformed typed journal") }
+    func resolve(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord { throw error }
+    func pendingEntries(productionsRootPath: String, now: Date) throws -> [LifecyclePriorityQueueEntry] { throw error }
+    func acknowledge(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord { throw error }
+    func markCorrected(operationID: UUID, correctedBy: UUID, productionsRootPath: String, workID: String) throws { throw error }
+    func recoverCommittedCorrections(productionsRootPath: String) throws { throw error }
 }
 
 final class SyntheticProductionsFixture {
