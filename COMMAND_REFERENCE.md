@@ -21,7 +21,7 @@ Capture-copy and automatic capture also bind the exact canonical preview bytes. 
 
 Confirmation tokens are state-bound, not reusable approvals. A changed source, destination, Productions contract, Inbox, Canvas, Memento, Flow, Identifier Ledger, or other previewed authority can invalidate execution.
 
-## Office Task checkpoint
+## Office Task checkpoint and accepted handoff
 
 This command is callable only after independently verified DOC-0016 version
 1.12 adoption and with bounded owner authorization. Activation requires exact
@@ -43,6 +43,15 @@ OperationsDashboard task checkpoint \
   --evidence <one-line accepted evidence> [--evidence <value> ...] \
   --next-step <complete replacement text> \
   --last-validated-state <complete replacement text>
+
+OperationsDashboard review accept-handoff \
+  --productions-root <path> --source <TASK-ID> --dependent <TASK-ID> \
+  --source-commit <40-lowercase-hex> --marker <marker> \
+  --accepted-at <ISO-8601-with-explicit-offset-and-seconds> \
+  --evidence <contained-canonical-location> \
+  --expected-workspace-sha256 <64-lowercase-hex> \
+  --expected-dependent-workspace-sha256 <64-lowercase-hex> \
+  --expected-registry-sha256 <64-lowercase-hex>
 
 OperationsDashboard office inspect \
   --productions-root <path> --operation <UUID>
@@ -71,12 +80,32 @@ lead, dependencies, relationships, Canvas, Crumbs, Mementos, or Flow. The
 complete replacement values, exact Step, ordered evidence, and both hashes are
 the authorization boundary, so this command has no preview form.
 
+Accepted-handoff inputs bind the complete Task Registry plus source and
+dependent Task Workspace preimages. The command requires the dependent's
+Registry and Workspace `Depends on` relationship to name the source exactly
+once, the source Workspace `Related records` relationship to name the
+dependent exactly once, and the contained evidence file to include the exact
+authorized source commit. Its sole canonical edit is one immutable
+`Marker | Accepted at | Evidence` row in the source's unique `Accepted
+Handoffs` section, creating that optional section at document end when absent.
+It never edits Registry, the dependent Workspace, lifecycle, priority, Canvas,
+or eligibility dispositions and never starts or activates the dependent.
+
 Output is stable JSON. `committed` exit 0 includes the operation UUID,
 completed Step, pre/post Workspace hashes, unchanged Registry hash, next gate,
 observed `focused`, `clear`, or `unknown` Canvas state, and always-present
 Boolean `historicalCommitProven`, `journalFinalized`, and `fallbackRecorded`.
 Only literal `committed` releases a later phase, which must bind the returned
 post-write Workspace hash.
+
+Accepted-handoff success likewise returns stable JSON with the source,
+dependent, source commit, marker, source pre/post hashes, unchanged dependent
+and Registry hashes, and `discoveryOutcome: "complete"` with an exact
+always-present `newlyEligibleHooks` array. Reverse discovery is read-only. If
+it fails after the marker commit and normal journal finalization are proven,
+the command returns `committed-with-discovery-failure` exit 3, preserves the
+commit and its historical proof, returns the candidate array as `null`, and
+states `Do not retry automatically.`
 
 `not-committed` returns exit 2. `uncertain` returns exit 3. Every replacement
 exception, reload failure, journal-read failure after replacement, or terminal
@@ -86,7 +115,8 @@ once when normal terminal finalization fails; `fallbackRecorded` is true only
 when that marker was durably recorded. Historical-commit proof is monotonic.
 Failures before durable initial-journal creation never emit `inspectCommand`
 and diagnose that no operation journal was created.
-`office inspect` reads the journal first, answers durable definite-no-commit
+`office inspect` dispatches by the exact journal operation kind, then reads the
+journal first and answers durable definite-no-commit
 without consulting mutable canonical files, then requires the supplied
 canonical Productions root to exactly equal the journal's immutable root before
 any live read or journal reconciliation. A root mismatch freezes the journal
@@ -103,6 +133,11 @@ the monotonic merged terminal state with consistent finalized/fallback flags;
 fallback state and historical-commit proof are sticky. Startup recovery reports
 incomplete operations but never replays,
 retries, restores, deletes, or finalizes one.
+If accepted-handoff inspection completely validates an expected postimage from
+a formerly nonproving journal, that validation establishes monotonic historical
+commit proof before terminal finalization. A finalization failure uses the same
+typed committed fallback and no-retry outcome; it never returns to an unproven
+classification.
 
 ## Canvas
 
@@ -338,6 +373,6 @@ validation.
 
 ## Routing and GUI launch
 
-A malformed invocation owned by the `task`, `office`, `canvas`, `memento`, `flow`, or `capture` command family remains headless: it prints stable JSON, usage, or a diagnostic and exits 2 instead of opening the GUI. This includes incomplete forms such as `task`, `office`, `capture`, `capture unknown`, and `capture preview unknown`.
+A malformed invocation owned by the `task`, `review`, `office`, `canvas`, `memento`, `flow`, or `capture` command family remains headless: it prints stable JSON, usage, or a diagnostic and exits 2 instead of opening the GUI. This includes incomplete forms such as `task`, `review`, `office`, `capture`, `capture unknown`, and `capture preview unknown`.
 
 Launching `OperationsDashboard` with no arguments does not select a headless command. It retains the normal Operations Dashboard GUI launch.

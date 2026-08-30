@@ -30,3 +30,14 @@ Done/Complete transition is superseding history, while `perform` alone applies
 the stricter non-Done checkpoint-eligibility rule.
 The headless adapter owns only parsing, stable JSON, and exit-code mapping; it
 does not provide a second filesystem mutation path.
+
+`AcceptedHandoffService` reuses that shared root-scoped lock, terminal proof
+state, canonical-root and no-follow primitives while retaining a distinct
+typed operation journal. It binds the Task Registry, source and dependent Task
+Workspaces, reciprocal relationship, source commit, and contained evidence;
+its only canonical replacement appends one immutable accepted-handoff row to
+the source Workspace. Normal finalization precedes read-only reverse discovery,
+so a discovery failure cannot roll back or weaken a proven marker commit.
+`ApplicationSupportOfficeWorkspaceInspector` reads the exact journal envelope
+and dispatches `office inspect` to the checkpoint or accepted-handoff service;
+neither inspection path retries or mutates an authorized Workspace operation.

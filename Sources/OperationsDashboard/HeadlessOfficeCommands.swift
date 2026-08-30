@@ -3,31 +3,58 @@ import Foundation
 enum HeadlessOfficeCommandLine {
     static let usage = """
     Usage: OperationsDashboard task checkpoint --productions-root <path> --task <TASK-ID> --expected-workspace-sha256 <64-lowercase-hex> --expected-registry-sha256 <64-lowercase-hex> --unfinished-step <S##> --evidence <one-line accepted evidence> [--evidence <value> ...] --next-step <complete replacement text> --last-validated-state <complete replacement text>
+           OperationsDashboard review accept-handoff --productions-root <path> --source <TASK-ID> --dependent <TASK-ID> --source-commit <40-lowercase-hex> --marker <marker> --accepted-at <ISO-8601> --evidence <canonical-location> --expected-workspace-sha256 <64-lowercase-hex> --expected-dependent-workspace-sha256 <64-lowercase-hex> --expected-registry-sha256 <64-lowercase-hex>
            OperationsDashboard office inspect --productions-root <path> --operation <UUID>
     """
 
     static func runIfRequested(
         arguments: [String] = CommandLine.arguments,
         service: TaskCheckpointService = TaskCheckpointService(),
+        acceptedHandoffService: AcceptedHandoffService = AcceptedHandoffService(),
+        inspector: (any OfficeWorkspaceInspecting)? = nil,
         write: (String) -> Void = { print($0) }
     ) -> Int32? {
         let values = Array(arguments.dropFirst())
-        guard let command = values.first, command == "task" || command == "office" else { return nil }
+        guard let command = values.first, command == "task" || command == "review" || command == "office" else { return nil }
         do {
             let invocation = try parse(values)
-            let result: TaskCheckpointCommandResult
             switch invocation {
             case let .checkpoint(request, configuration):
-                result = try service.perform(request: request, configuration: configuration)
+                let result = try service.perform(request: request, configuration: configuration)
+                write(try render(result))
+                return exitCode(for: result.outcome)
+            case let .acceptHandoff(request, configuration):
+                let result = try acceptedHandoffService.perform(request: request, configuration: configuration)
+                write(try render(result))
+                return exitCode(for: result.outcome)
             case let .inspect(operationID, configuration):
-                result = try service.inspect(operationID: operationID, configuration: configuration)
+                let resolved = try (inspector ?? ServiceBackedOfficeWorkspaceInspector(
+                    checkpointService: service, acceptedHandoffService: acceptedHandoffService
+                )).inspect(operationID: operationID, configuration: configuration)
+                switch resolved {
+                case let .checkpoint(result): write(try render(result))
+                case let .acceptedHandoff(result): write(try render(result))
+                }
+                return 0
             }
-            write(try render(result))
-            if case .inspect = invocation { return 0 }
-            return exitCode(for: result)
         } catch let failure as TaskCheckpointCommandFailure {
             write((try? render(failure.result)) ?? failure.result.diagnostic ?? "Task checkpoint failed.")
             return failure.exitCode
+        } catch let failure as AcceptedHandoffCommandFailure {
+            write((try? render(failure.result)) ?? failure.result.diagnostic ?? "Accepted handoff failed.")
+            return failure.exitCode
+        } catch let dispatch as OfficeWorkspaceInspectionDispatchError {
+            let suppliedOperationID = values.count == 6 && values[0] == "office" && values[1] == "inspect" &&
+                values[4] == "--operation" ? UUID(uuidString: values[5]) : nil
+            let result = TaskCheckpointCommandResult(
+                outcome: "uncertain", operationUUID: suppliedOperationID, taskID: nil, completedStep: nil,
+                workspaceSHA256Before: nil, workspaceSHA256After: nil, registrySHA256: nil,
+                nextGate: nil, canvasState: nil, classification: "journal-read-failed",
+                journalFinalized: false, fallbackRecorded: false, historicalCommitProven: false,
+                inspectCommand: nil, diagnostic: dispatch.localizedDescription
+            )
+            write((try? render(result)) ?? dispatch.localizedDescription)
+            return 3
         } catch {
             let result = TaskCheckpointCommandResult(
                 outcome: "not-committed", operationUUID: nil, taskID: nil, completedStep: nil,
@@ -43,6 +70,7 @@ enum HeadlessOfficeCommandLine {
 
     enum Invocation: Equatable {
         case checkpoint(TaskCheckpointRequest, ProductionsConfiguration)
+        case acceptHandoff(AcceptedHandoffRequest, ProductionsConfiguration)
         case inspect(UUID, ProductionsConfiguration)
     }
 
@@ -54,6 +82,38 @@ enum HeadlessOfficeCommandLine {
                 throw HeadlessOfficeUsageError(usage)
             }
             return .inspect(operationID, ProductionsConfiguration(schemaVersion: 2, productionsRootPath: values[3]))
+        }
+        if values.first == "review" {
+            guard values.count >= 2, values[1] == "accept-handoff" else {
+                throw HeadlessOfficeUsageError(usage)
+            }
+            var options: [String: String] = [:]
+            let allowed = Set([
+                "--productions-root", "--source", "--dependent", "--source-commit", "--marker",
+                "--accepted-at", "--evidence", "--expected-workspace-sha256",
+                "--expected-dependent-workspace-sha256", "--expected-registry-sha256",
+            ])
+            var index = 2
+            while index < values.count {
+                let option = values[index]
+                guard allowed.contains(option), index + 1 < values.count, options[option] == nil else {
+                    throw HeadlessOfficeUsageError(usage)
+                }
+                options[option] = values[index + 1]
+                index += 2
+            }
+            guard allowed.allSatisfy({ options[$0] != nil }) else { throw HeadlessOfficeUsageError(usage) }
+            return .acceptHandoff(
+                AcceptedHandoffRequest(
+                    sourceID: options["--source"]!, dependentID: options["--dependent"]!,
+                    sourceCommit: options["--source-commit"]!, marker: options["--marker"]!,
+                    acceptedAt: options["--accepted-at"]!, evidence: options["--evidence"]!,
+                    expectedWorkspaceSHA256: options["--expected-workspace-sha256"]!,
+                    expectedDependentWorkspaceSHA256: options["--expected-dependent-workspace-sha256"]!,
+                    expectedRegistrySHA256: options["--expected-registry-sha256"]!
+                ),
+                ProductionsConfiguration(schemaVersion: 2, productionsRootPath: options["--productions-root"]!)
+            )
         }
         guard values.count >= 2, values[0] == "task", values[1] == "checkpoint" else {
             throw HeadlessOfficeUsageError(usage)
@@ -100,8 +160,8 @@ enum HeadlessOfficeCommandLine {
         return .checkpoint(request, ProductionsConfiguration(schemaVersion: 2, productionsRootPath: singular["--productions-root"]!))
     }
 
-    private static func exitCode(for result: TaskCheckpointCommandResult) -> Int32 {
-        switch result.outcome {
+    private static func exitCode(for outcome: String) -> Int32 {
+        switch outcome {
         case "committed": 0
         case "not-committed": 2
         default: 3
@@ -109,6 +169,12 @@ enum HeadlessOfficeCommandLine {
     }
 
     private static func render(_ result: TaskCheckpointCommandResult) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return String(decoding: try encoder.encode(result), as: UTF8.self)
+    }
+
+    private static func render(_ result: AcceptedHandoffCommandResult) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return String(decoding: try encoder.encode(result), as: UTF8.self)

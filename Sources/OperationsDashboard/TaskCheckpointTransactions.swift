@@ -244,7 +244,7 @@ private enum TaskCheckpointJournalEnvelopeError: LocalizedError {
     }
 }
 
-private enum TaskCheckpointUTF8 {
+enum TaskCheckpointUTF8 {
     static func equal(_ lhs: String, _ rhs: String) -> Bool {
         lhs.utf8.elementsEqual(rhs.utf8)
     }
@@ -254,7 +254,7 @@ private enum TaskCheckpointUTF8 {
     }
 }
 
-private enum TaskCheckpointCanonicalRoot {
+enum TaskCheckpointCanonicalRoot {
     static func isExact(_ path: String) -> Bool {
         guard path.hasPrefix("/"), path != "/", !path.hasSuffix("/"),
               !path.contains("//"),
@@ -278,7 +278,7 @@ private enum TaskCheckpointCanonicalRoot {
     }
 }
 
-private extension ProductionsConfiguration {
+extension ProductionsConfiguration {
     var taskCheckpointRootURL: URL { TaskCheckpointCanonicalRoot.url(productionsRootPath) }
 
     func taskCheckpointURL(_ relativePath: String, directory: Bool = false) -> URL {
