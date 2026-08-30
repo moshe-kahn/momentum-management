@@ -1674,7 +1674,7 @@ enum AcceptedHandoffDiscovery {
             guard TaskCheckpointUTF8.equal(workspace.field("Disposition"), row["Disposition"] ?? ""),
                   TaskCheckpointUTF8.equal(workspace.field("Priority"), row["Priority"] ?? ""),
                   TaskCheckpointUTF8.equal(workspace.field("Current lead"), row["Current lead"] ?? ""),
-                  TaskCheckpointUTF8.equal(workspace.field("Workspace"), "`Workspace/\(candidateID)/`") else {
+                  TaskCheckpointUTF8.equal(workspace.field("Workspace"), "`Workspace/\(candidateID)/`.") else {
                 throw AcceptedHandoffValidationError.targetContractInvalid("Idea Workspace identity or authoritative Registry fields disagree.")
             }
         } else {

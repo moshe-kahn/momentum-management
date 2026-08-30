@@ -343,6 +343,37 @@ final class AcceptedHandoffTransactionsTests: XCTestCase {
         XCTAssertNotNil(result.inspectCommand)
     }
 
+    func testProductionCommandPathAcceptsAdoptedIDEA0006TerminalPeriodDuringDiscovery() throws {
+        let fixture = try HandoffFixture(reviewHook: true); defer { fixture.remove() }
+        try fixture.installAdoptedV112ActivationPackage()
+        let journal = HandoffMemoryJournal()
+        let accepted = AcceptedHandoffService(
+            journalStore: journal,
+            contractValidator: AdoptedOfficeV112ContractValidator(),
+            makeOperationID: { self.operationID },
+            discover: AcceptedHandoffDiscovery.newlyEligible
+        )
+        var output: [String] = []
+
+        let exit = HeadlessOfficeCommandLine.runIfRequested(
+            arguments: fixture.arguments(), acceptedHandoffService: accepted,
+            write: { output.append($0) }
+        )
+
+        XCTAssertEqual(exit, 0)
+        let result = try JSONDecoder().decode(
+            AcceptedHandoffCommandResult.self,
+            from: Data(try XCTUnwrap(output.first).utf8)
+        )
+        XCTAssertEqual(result.outcome, "committed")
+        XCTAssertEqual(result.classification, "committed-and-current")
+        XCTAssertEqual(result.discoveryOutcome, "complete")
+        XCTAssertEqual(result.newlyEligibleHooks, [
+            .init(candidateID: "TASK-0064", hook: HandoffFixture.primaryHook),
+        ])
+        XCTAssertEqual(journal.values.count, 1)
+    }
+
     func testActivationAndInputFailuresArePrejournal() throws {
         let fixture = try HandoffFixture(); defer { fixture.remove() }
         let journal = HandoffMemoryJournal()
@@ -971,7 +1002,7 @@ private final class HandoffFixture {
         Disposition: Open
         Priority: Medium
         Current lead: Laboratory
-        Workspace: `Workspace/IDEA-0001/`
+        Workspace: `Workspace/IDEA-0001/`.
         Source artifacts: —
         Related records: TASK-0064
         ```
@@ -983,6 +1014,33 @@ private final class HandoffFixture {
         \(row)
         """ + "\n"
         try write(workspace, to: root.appending(path: "Workspace/IDEA-0001/IDEA-0001.md"))
+    }
+
+    func installAdoptedV112ActivationPackage() throws {
+        let liveRoot = URL(fileURLWithPath: "/Users/kahntra/Productions", isDirectory: true)
+        for path in Array(AdoptedOfficeV112ContractValidator.immutableSHA256.keys) + [
+            "Warehouse/Reference/Document Registry.md",
+            "Workspace/IDEA-0006/IDEA-0006.md",
+            "Workspace/TASK-0017/TASK-0017.md",
+        ] {
+            try write(try Data(contentsOf: liveRoot.appending(path: path)), to: root.appending(path: path))
+        }
+        try append(
+            "| TASK-0017 | Decide Repository and Reference-Storage Structure | Active / Paused | Medium | Office | INIT-0001 | PROJ-0002 | Approved Git-safe migration sequence; sensitive-material handling decision | — | — | [TASK-0017](../../Workspace/TASK-0017/TASK-0017.md) |\n",
+            to: registryURL
+        )
+        let headers = [
+            "Idea ID", "Title", "Disposition", "Priority", "Current lead", "Related records",
+            "Review after", "Source artifacts", "Short description", "Workspace",
+        ]
+        let ideas = """
+        # Ideas
+
+        | \(headers.joined(separator: " | ")) |
+        | \(Array(repeating: "---", count: headers.count).joined(separator: " | ")) |
+        | IDEA-0006 | Explore Product Provisioning and Repair Tool | Open | Low | Office | TASK-0017; TASK-0015 | TASK-0017@done-complete | Product Provisioning specification | — | [IDEA-0006](../../Workspace/IDEA-0006/IDEA-0006.md) |
+        """ + "\n"
+        try write(ideas, to: root.appending(path: "Office/Registry/Ideas.md"))
     }
 
     static func reviewRow(
@@ -1090,6 +1148,11 @@ private final class HandoffFixture {
     private func write(_ value: String, to url: URL) throws {
         try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data(value.utf8).write(to: url)
+    }
+
+    private func write(_ value: Data, to url: URL) throws {
+        try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try value.write(to: url)
     }
 }
 
