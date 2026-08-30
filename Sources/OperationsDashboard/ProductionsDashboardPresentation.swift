@@ -11,6 +11,7 @@ enum ProductionsNavigationGroup: String, CaseIterable, Identifiable {
 enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     case inbox
     case reconciliations
+    case managerRouting
     case processing
     case canvas
     case crumbs
@@ -25,6 +26,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: "Inbox"
         case .reconciliations: "Reconciliation Review"
+        case .managerRouting: "Manager Routing"
         case .processing: "Processing"
         case .canvas: "Canvas"
         case .crumbs: "Crumbs"
@@ -39,6 +41,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: "Inbox is empty"
         case .reconciliations: "No pending reconciliations"
+        case .managerRouting: "No unresolved Manager routes"
         case .processing: "No processing bundles"
         case .canvas: "Canvas is empty"
         case .crumbs: "No open Crumbs"
@@ -53,6 +56,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
         switch self {
         case .inbox: "tray"
         case .reconciliations: "arrow.triangle.2.circlepath"
+        case .managerRouting: "point.3.connected.trianglepath.dotted"
         case .processing: "shippingbox"
         case .canvas: "rectangle.on.rectangle"
         case .crumbs: "circle.grid.3x3"
@@ -65,7 +69,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
 
     var group: ProductionsNavigationGroup {
         switch self {
-        case .inbox, .reconciliations, .processing: .intake
+        case .inbox, .reconciliations, .managerRouting, .processing: .intake
         case .canvas, .crumbs, .mementos, .priorityWork: .focus
         case .workItems, .plans: .browse
         }
@@ -139,6 +143,16 @@ enum ProductionsDashboardPresentation {
                     title: "\(item.workID) · \(item.workTitle)", subtitle: item.summary,
                     metadata: ["Pending owner confirmation", occurred, item.operationID.uuidString, item.fields.joined(separator: ", "), departmentLabel(department)],
                     department: department
+                )
+            }
+        case .managerRouting:
+            state.managerRouting.map { item in
+                ProductionsNavigationItem(
+                    id: "manager-route:\(item.operationID.uuidString)", targetID: item.taskID,
+                    title: "\(item.waitingFor.rawValue) · \(item.taskID)",
+                    subtitle: "\(item.state.rawValue) · unresolved \(item.unresolvedAgeSeconds)s",
+                    metadata: [item.operationID.uuidString, "Target \(item.targetThreadID)", "Age \(item.ageSeconds)s"] + (item.overdue ? ["Overdue"] : []),
+                    department: "Office"
                 )
             }
         case .processing:

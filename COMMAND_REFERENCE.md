@@ -222,6 +222,87 @@ update returns exit 3 with `office inspect` and no-retry guidance. A proven
 correction's `correctsOperation` is consumed by inspection/list recovery if its
 post-commit update of the older queue entry was interrupted.
 
+## Durable Manager routing lifecycle
+
+Manager routing state is local Operations Dashboard Application Support data,
+not a Productions record. It grants no Office mutation authority. Every route
+binds one stable operation UUID, exact Task and thread identities, bounded
+action, authority reference, timeout, and optional already-authorized next
+route. The complete state vocabulary is `queued`, `delivered/acknowledged`,
+`running`, `terminal-completed`, `terminal-blocked`, `terminal-uncertain`,
+`forwarded`, and `owner-decision-required`.
+
+Every timeout argument is an exact whole-second ISO-8601 value. A supplied but
+unparsable or fractional `--next-timeout-at` is rejected before UUID generation
+or storage. Generated parent and preauthorized-child operation UUIDs must be
+distinct. A preauthorized child UUID is a global durable reservation: later
+parents and reservations cannot claim any existing route or reservation ID.
+Reload rejects every collision except the intentional child-route overlap after
+that reservation's exact parent has forwarded the exact bound child.
+
+```text
+OperationsDashboard manager route create \
+  --task <TASK-ID> --manager-thread <thread-id> --target-thread <thread-id> \
+  --action <text> --authority <text> --timeout-at <ISO-8601> \
+  [--next-target-thread <thread-id> --next-action <text> \
+   --next-authority <text> --next-timeout-at <ISO-8601>]
+
+OperationsDashboard manager route acknowledge \
+  --operation <UUID> --target-thread <thread-id>
+OperationsDashboard manager route running \
+  --operation <UUID> --target-thread <thread-id>
+OperationsDashboard manager route terminal \
+  --operation <UUID> --target-thread <thread-id> \
+  --classification <completed|blocked|uncertain> --summary <text> \
+  --evidence <text> [--evidence <text> ...] --next-gate <text> \
+  --unperformed <text> [--unperformed <text> ...]
+```
+
+The destination acknowledges the supplied operation UUID and returns exactly
+one structured terminal handoff. An identical duplicate is idempotent and does
+not rewrite the ledger. A different duplicate is inspection-required and must
+not be retried automatically. Completed terminal handoffs atomically publish an
+embedded already-authorized next route and mark the source forwarded. If that
+child deadline is already reached, the valid parent receipt remains committed,
+no child is created, and the parent becomes an explicit Manager/owner decision.
+Blocked or uncertain terminal handoffs become the same explicit decision gate.
+No state changes Productions lifecycle, priority, Canvas, or Office records.
+
+```text
+OperationsDashboard manager routing status
+OperationsDashboard manager routing inspect --operation <UUID>
+OperationsDashboard manager routing idle-check
+OperationsDashboard manager routing reconcile preview \
+  --operation <UUID> \
+  --observation <silent-completion|empty-final-output|target-interrupted|timeout>
+OperationsDashboard manager routing reconcile apply \
+  --operation <UUID> --observation <value> \
+  --expected-ledger-sha256 <64-lowercase-hex> --confirm <preview-token>
+```
+
+Status groups every unresolved route as **Waiting for Manager**, **Waiting for
+target**, or **Waiting for owner**, includes route age and unresolved age, and
+marks overdue wakes. Before Manager idleness, `idle-check` requires every open
+route to have a live monitored target, scheduled wake, terminal already
+forwarded, or explicit owner decision. Silent completion, empty output,
+interruption, timeout, restart, or suspected duplication begins with read-only
+inspection/reconciliation. Apply is bound to the exact ledger hash and preview
+token; timeout preview and apply both reject a time before the exact route
+deadline. Monitor wakes equal the bound timeout (or exact terminal transition),
+and acknowledgement/running timestamps equal their durable transitions.
+Blocker or uncertainty never authorizes an automatic retry.
+
+The first durable route also publishes a sibling initialization marker. After
+that point, a missing or unavailable ledger directory/file is storage-uncertain
+or corrupt in status and idle checks, never an empty queue. If create publication
+or reload is uncertain, the result retains the generated operation UUID and an
+exact `manager routing inspect --operation <UUID>` command; do not retry it.
+
+The Manager owns routing only. The destination owns acknowledgement and its one
+terminal handoff. The Office Administrator retains write authority only through
+separately owner-authorized governed commands, and the Coordinator retains
+owner-facing strategy and decisions.
+
 ## Canvas
 
 ### Ordinary desired-state Focus and Clear (adopted)
@@ -456,6 +537,6 @@ validation.
 
 ## Routing and GUI launch
 
-A malformed invocation owned by the `task`, `review`, `office`, `canvas`, `memento`, `flow`, or `capture` command family remains headless: it prints stable JSON, usage, or a diagnostic and exits 2 instead of opening the GUI. This includes incomplete forms such as `task`, `review`, `office`, `capture`, `capture unknown`, and `capture preview unknown`.
+A malformed invocation owned by the `manager`, `task`, `review`, `office`, `canvas`, `memento`, `flow`, or `capture` command family remains headless: it prints stable JSON, usage, or a diagnostic and exits 2 instead of opening the GUI. This includes incomplete forms such as `manager`, `manager route`, `task`, `review`, `office`, `capture`, `capture unknown`, and `capture preview unknown`.
 
 Launching `OperationsDashboard` with no arguments does not select a headless command. It retains the normal Operations Dashboard GUI launch.

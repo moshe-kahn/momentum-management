@@ -199,6 +199,17 @@ struct ReconciliationQueueItem: Identifiable, Equatable {
     let occurred: Date
     var id: UUID { operationID }
 }
+struct ManagerRoutingQueueItem: Identifiable, Equatable {
+    let operationID: UUID
+    let taskID: String
+    let targetThreadID: String
+    let state: ManagerRouteState
+    let waitingFor: ManagerRouteWaitingFor
+    let ageSeconds: Int
+    let unresolvedAgeSeconds: Int
+    let overdue: Bool
+    var id: UUID { operationID }
+}
 struct ProductionsState: Equatable {
     let configuration: ProductionsConfiguration
     let inbox: [FlowItem]
@@ -210,13 +221,15 @@ struct ProductionsState: Equatable {
     let crumbs: [Crumb]
     let mementos: [Memento]
     let reconciliations: [ReconciliationQueueItem]
+    let managerRouting: [ManagerRoutingQueueItem]
     let issues: [ProductionsIssue]
 
-    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], departments: [DepartmentRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], reconciliations: [ReconciliationQueueItem] = [], issues: [ProductionsIssue]) {
+    init(configuration: ProductionsConfiguration, inbox: [FlowItem], processing: [FlowItem], work: [WorkItem], products: [ProductRecord] = [], departments: [DepartmentRecord] = [], canvas: [CanvasEvent], crumbs: [Crumb], mementos: [Memento], reconciliations: [ReconciliationQueueItem] = [], managerRouting: [ManagerRoutingQueueItem] = [], issues: [ProductionsIssue]) {
         self.configuration = configuration; self.inbox = inbox; self.processing = processing
         self.work = work; self.products = products; self.departments = departments; self.canvas = canvas; self.crumbs = crumbs
         self.mementos = mementos; self.issues = issues
         self.reconciliations = reconciliations
+        self.managerRouting = managerRouting
     }
     var canvasCurrentIDs: Set<String> { Set(canvas.sorted { $0.sequence < $1.sequence }.reduce(into: [String: String]()) { if $1.event == "Placed" || $1.event == "Cleared" { $0[$1.workID] = $1.event } }.filter { $0.value == "Placed" }.map(\.key)) }
 }
@@ -224,14 +237,17 @@ struct ProductionsState: Equatable {
 struct ProductionsLoader {
     let reader: any ProductionsReading
     let reconciliationResolver: any ReconciliationQueueResolving
+    let managerRoutingReader: any ManagerRoutingStatusReading
     private let dateFormatter = ISO8601DateFormatter()
 
     init(
         reader: any ProductionsReading,
-        reconciliationResolver: any ReconciliationQueueResolving = ApplicationSupportReconciliationQueueResolver()
+        reconciliationResolver: any ReconciliationQueueResolving = ApplicationSupportReconciliationQueueResolver(),
+        managerRoutingReader: any ManagerRoutingStatusReading = ManagerRoutingService()
     ) {
         self.reader = reader
         self.reconciliationResolver = reconciliationResolver
+        self.managerRoutingReader = managerRoutingReader
     }
 
     func load(configuration: ProductionsConfiguration) -> ProductionsState {
@@ -270,7 +286,20 @@ struct ProductionsLoader {
             reconciliations = []
             issues.append(.malformed("Administrative reconciliation queue: \(error.localizedDescription)"))
         }
-        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, departments: departments, canvas: canvas, crumbs: crumbs, mementos: mementos, reconciliations: reconciliations, issues: issues)
+        let managerRouting: [ManagerRoutingQueueItem]
+        do {
+            managerRouting = try managerRoutingReader.status().map {
+                ManagerRoutingQueueItem(
+                    operationID: $0.operationUUID, taskID: $0.taskID, targetThreadID: $0.targetThreadID,
+                    state: $0.state, waitingFor: $0.waitingFor, ageSeconds: $0.ageSeconds,
+                    unresolvedAgeSeconds: $0.unresolvedAgeSeconds, overdue: $0.overdue
+                )
+            }
+        } catch {
+            managerRouting = []
+            issues.append(.malformed("Manager routing queue: \(error.localizedDescription)"))
+        }
+        return ProductionsState(configuration: validated, inbox: inbox, processing: flow.filter { $0.stage == "Processing" }, work: work, products: products, departments: departments, canvas: canvas, crumbs: crumbs, mementos: mementos, reconciliations: reconciliations, managerRouting: managerRouting, issues: issues)
     }
 
     private func validatePath(_ path: ProductionsPath, configuration: ProductionsConfiguration, issues: inout [ProductionsIssue]) { let url = configuration.url(path.rawValue, directory: path == .inbox || path == .processing); if !reader.exists(at: url) { issues.append(.missing(path.rawValue)) } else if !reader.isReadable(at: url) { issues.append(.unreadable(path.rawValue)) } }

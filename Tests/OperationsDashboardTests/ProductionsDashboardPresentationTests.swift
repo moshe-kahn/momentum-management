@@ -4,7 +4,7 @@ import XCTest
 
 final class ProductionsDashboardPresentationTests: XCTestCase {
     func testNavigationSectionsUseReviewedIntakeFocusAndBrowseModes() {
-        XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .reconciliations, .processing])
+        XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .reconciliations, .managerRouting, .processing])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .focus), [.canvas, .crumbs, .mementos, .priorityWork])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .browse), [.workItems, .plans])
     }
@@ -17,6 +17,23 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertTrue(item.metadata.contains("Pending owner confirmation"))
         XCTAssertTrue(item.metadata.contains(operationID.uuidString))
         XCTAssertTrue(ProductionsPresentationAccessibility.rowLabel(item).contains("priority: High → Medium"))
+    }
+
+    func testManagerRoutingQueueShowsWaitingCategoryAgeAndOperationEvidence() throws {
+        let operationID = UUID(uuidString: "22345678-1234-4234-8234-123456789ABC")!
+        let route = ManagerRoutingQueueItem(
+            operationID: operationID, taskID: "TASK-000001",
+            targetThreadID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", state: .running,
+            waitingFor: .target, ageSeconds: 90, unresolvedAgeSeconds: 30, overdue: true
+        )
+        let item = try XCTUnwrap(ProductionsDashboardPresentation.items(
+            for: .managerRouting, in: richState(managerRouting: [route])
+        ).first)
+        XCTAssertTrue(item.title.contains("Waiting for target"))
+        XCTAssertTrue(item.subtitle.contains("unresolved 30s"))
+        XCTAssertTrue(item.metadata.contains("Age 90s"))
+        XCTAssertTrue(item.metadata.contains("Overdue"))
+        XCTAssertTrue(ProductionsPresentationAccessibility.rowLabel(item).contains(operationID.uuidString))
     }
 
     func testWorkItemsAndPlansSeparateEveryCanonicalKindWithoutInventingProductDepartment() throws {
@@ -243,7 +260,9 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertNil(pasteboard.text, "Stale package bytes must never reach the pasteboard.")
     }
 
-    private func richState(reconciliations: [ReconciliationQueueItem] = []) -> ProductionsState {
+    private func richState(
+        reconciliations: [ReconciliationQueueItem] = [], managerRouting: [ManagerRoutingQueueItem] = []
+    ) -> ProductionsState {
         let task = work("TASK-000001", kind: .task, title: "Office task", lifecycle: "Active / Current", priority: "High", department: "Office")
         let idea = work("IDEA-000001", kind: .idea, title: "Studio idea", lifecycle: "Open", priority: "Highest", department: "Studio")
         let project = work("PROJ-000001", kind: .project, title: "Office project", lifecycle: "Active / Current", priority: "Medium", department: "Office")
@@ -270,6 +289,7 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
             crumbs: crumbs,
             mementos: mementos,
             reconciliations: reconciliations,
+            managerRouting: managerRouting,
             issues: []
         )
     }

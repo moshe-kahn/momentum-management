@@ -34,6 +34,35 @@ final class ProductionsReadOnlyTests: XCTestCase {
         XCTAssertTrue(state.issues.contains { $0.message.contains("Administrative reconciliation queue") && $0.message.contains("malformed typed journal") })
     }
 
+    func testManagerRoutingQueueFeedsReadOnlyAdministrativeStatus() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let operation = UUID(uuidString: "A2345678-1234-4234-8234-123456789ABC")!
+        let reader = ReadOnlyManagerRoutingReader(items: [
+            .init(
+                operationUUID: operation, taskID: "TASK-000001",
+                targetThreadID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", state: .running,
+                waitingFor: .target, ageSeconds: 45, unresolvedAgeSeconds: 15,
+                timeoutAt: Date(timeIntervalSince1970: 1_788_000_100), overdue: false
+            )
+        ])
+        let state = ProductionsLoader(reader: LocalFileSystem(), managerRoutingReader: reader)
+            .load(configuration: fixture.configuration)
+        XCTAssertEqual(state.managerRouting.map(\.operationID), [operation])
+        XCTAssertEqual(state.managerRouting.first?.waitingFor, .target)
+        XCTAssertEqual(state.managerRouting.first?.unresolvedAgeSeconds, 15)
+        XCTAssertFalse(state.issues.contains { $0.message.contains("Manager routing queue") })
+    }
+
+    func testManagerRoutingLedgerFailureIsVisibleInsteadOfSilentlyDropped() throws {
+        let fixture = try SyntheticProductionsFixture()
+        defer { fixture.remove() }
+        let state = ProductionsLoader(reader: LocalFileSystem(), managerRoutingReader: FailingManagerRoutingReader())
+            .load(configuration: fixture.configuration)
+        XCTAssertTrue(state.managerRouting.isEmpty)
+        XCTAssertTrue(state.issues.contains { $0.message.contains("Manager routing queue") && $0.message.contains("corrupt route ledger") })
+    }
+
     func testCanonicalCommaBearingCoreRecordFieldKeyRemainsDistinct() throws {
         let record = try WorkspaceMarkdown.parse("""
         # TASK-000001
@@ -340,6 +369,17 @@ private struct FailingReadOnlyQueueResolver: ReconciliationQueueResolving {
     func acknowledge(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord { throw error }
     func markCorrected(operationID: UUID, correctedBy: UUID, productionsRootPath: String, workID: String) throws { throw error }
     func recoverCommittedCorrections(productionsRootPath: String) throws { throw error }
+}
+
+private struct ReadOnlyManagerRoutingReader: ManagerRoutingStatusReading {
+    let items: [ManagerRoutingStatusItem]
+    func status() throws -> [ManagerRoutingStatusItem] { items }
+}
+
+private struct FailingManagerRoutingReader: ManagerRoutingStatusReading {
+    func status() throws -> [ManagerRoutingStatusItem] {
+        throw ProductionsConfigurationError.malformed("corrupt route ledger")
+    }
 }
 
 final class SyntheticProductionsFixture {
