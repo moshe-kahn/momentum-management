@@ -244,10 +244,54 @@ private enum TaskCheckpointJournalEnvelopeError: LocalizedError {
     }
 }
 
+private enum TaskCheckpointUTF8 {
+    static func equal(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.utf8.elementsEqual(rhs.utf8)
+    }
+
+    static func hasPrefix(_ value: String, _ prefix: String) -> Bool {
+        value.utf8.starts(with: prefix.utf8)
+    }
+}
+
+private enum TaskCheckpointCanonicalRoot {
+    static func isExact(_ path: String) -> Bool {
+        guard path.hasPrefix("/"), path != "/", !path.hasSuffix("/"),
+              !path.contains("//"),
+              !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
+            return false
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.first?.isEmpty == true,
+              components.dropFirst().allSatisfy({
+                  !$0.isEmpty &&
+                  !TaskCheckpointUTF8.equal(String($0), ".") &&
+                  !TaskCheckpointUTF8.equal(String($0), "..")
+              }) else {
+            return false
+        }
+        return TaskCheckpointUTF8.equal(URL(fileURLWithPath: path, isDirectory: true).path, path)
+    }
+
+    static func url(_ path: String) -> URL {
+        URL(fileURLWithPath: path, isDirectory: true)
+    }
+}
+
+private extension ProductionsConfiguration {
+    var taskCheckpointRootURL: URL { TaskCheckpointCanonicalRoot.url(productionsRootPath) }
+
+    func taskCheckpointURL(_ relativePath: String, directory: Bool = false) -> URL {
+        taskCheckpointRootURL.appending(
+            path: relativePath,
+            directoryHint: directory ? .isDirectory : .notDirectory
+        )
+    }
+}
+
 private extension TaskCheckpointJournal {
     func validateEnvelope(requestedOperationID: UUID) throws {
         let hashPattern = #"^[0-9a-f]{64}$"#
-        let canonicalRoot = URL(fileURLWithPath: productionsRootPath, isDirectory: true).standardizedFileURL.path
         guard operationUUID == requestedOperationID,
               schemaVersion == Self.schemaVersion,
               operationKind == "task-checkpoint",
@@ -255,7 +299,7 @@ private extension TaskCheckpointJournal {
               stepID.range(of: #"^S[0-9]{2}$"#, options: .regularExpression) != nil,
               registryPath == "Office/Registry/Tasks.md",
               workspacePath == "Workspace/\(taskID)/\(taskID).md",
-              productionsRootPath.hasPrefix("/"), productionsRootPath != "/", canonicalRoot == productionsRootPath,
+              TaskCheckpointCanonicalRoot.isExact(productionsRootPath),
               registrySHA256.range(of: hashPattern, options: .regularExpression) != nil,
               workspaceSHA256Before.range(of: hashPattern, options: .regularExpression) != nil,
               workspaceSHA256ExpectedAfter.range(of: hashPattern, options: .regularExpression) != nil,
@@ -297,7 +341,7 @@ private extension TaskCheckpointJournal {
     private func immutableEnvelopeEquals(_ other: TaskCheckpointJournal) -> Bool {
         schemaVersion == other.schemaVersion &&
         operationUUID == other.operationUUID &&
-        productionsRootPath == other.productionsRootPath &&
+        TaskCheckpointUTF8.equal(productionsRootPath, other.productionsRootPath) &&
         taskID == other.taskID &&
         stepID == other.stepID &&
         timestamp == other.timestamp &&
@@ -396,7 +440,12 @@ struct AdoptedOfficeV112ContractValidator: OfficeV112ContractValidating {
     init(manager: FileManager = .default) { self.manager = manager }
 
     func validate(configuration: ProductionsConfiguration) throws {
-        let root = configuration.rootURL
+        guard TaskCheckpointCanonicalRoot.isExact(configuration.productionsRootPath) else {
+            throw OfficeContractValidationError.contractNotAdopted(
+                "The supplied Productions root must use one exact absolute spelling without dot segments, repeated separators, a trailing separator, or control characters."
+            )
+        }
+        let root = configuration.taskCheckpointRootURL
         try requireSafeDirectory(root, label: "Productions root")
         for (path, expectedHash) in Self.immutableSHA256 {
             let data = try readSafeData(root: root, path: path)
@@ -682,9 +731,10 @@ struct AdoptedOfficeV112ContractValidator: OfficeV112ContractValidating {
     }
 
     private func requireSafeFile(_ url: URL, inside root: URL, label: String) throws {
-        let canonicalRoot = root.standardizedFileURL.path
-        let target = url.standardizedFileURL
-        guard target.path.hasPrefix(canonicalRoot + "/"), manager.isReadableFile(atPath: target.path) else {
+        let canonicalRoot = root.path
+        let target = url
+        guard TaskCheckpointUTF8.hasPrefix(target.path, canonicalRoot + "/"),
+              manager.isReadableFile(atPath: target.path) else {
             throw OfficeContractValidationError.contractNotAdopted("\(label) is unavailable or outside Productions.")
         }
         var status = stat()
@@ -696,7 +746,13 @@ struct AdoptedOfficeV112ContractValidator: OfficeV112ContractValidating {
 
     private func requireNoSymlinkComponents(_ url: URL) throws {
         var current = URL(fileURLWithPath: "/", isDirectory: true)
-        for component in url.standardizedFileURL.pathComponents.dropFirst() {
+        for component in url.pathComponents.dropFirst() {
+            guard let entries = try? manager.contentsOfDirectory(atPath: current.path),
+                  entries.contains(where: { TaskCheckpointUTF8.equal($0, component) }) else {
+                throw OfficeContractValidationError.contractNotAdopted(
+                    "A governed path component does not use exact canonical spelling: \(current.appending(path: component).path)."
+                )
+            }
             current.append(path: component)
             if (try? manager.destinationOfSymbolicLink(atPath: current.path)) != nil {
                 throw OfficeContractValidationError.contractNotAdopted("A governed path contains a symbolic link: \(current.path).")
@@ -791,7 +847,14 @@ struct TaskCheckpointService {
     func startupRecovery() -> [TaskCheckpointJournal] { (try? journalStore.incomplete()) ?? [] }
 
     func perform(request: TaskCheckpointRequest, configuration: ProductionsConfiguration) throws -> TaskCheckpointCommandResult {
-        do { try contractValidator.validate(configuration: configuration) }
+        do {
+            guard TaskCheckpointCanonicalRoot.isExact(configuration.productionsRootPath) else {
+                throw OfficeContractValidationError.contractNotAdopted(
+                    "The supplied Productions root must use one exact absolute spelling without dot segments, repeated separators, a trailing separator, or control characters."
+                )
+            }
+            try contractValidator.validate(configuration: configuration)
+        }
         catch {
             throw failure(
                 outcome: "not-committed", operationID: nil, request: request,
@@ -811,8 +874,8 @@ struct TaskCheckpointService {
             )
         }
 
-        let registryURL = configuration.url(ProductionsPath.tasks.rawValue)
-        do { try requireSafeCanonicalFile(registryURL, root: configuration.rootURL, label: "Task Registry") }
+        let registryURL = configuration.taskCheckpointURL(ProductionsPath.tasks.rawValue)
+        do { try requireSafeCanonicalFile(registryURL, root: configuration.taskCheckpointRootURL, label: "Task Registry") }
         catch {
             throw failure(
                 outcome: "not-committed", operationID: operationID, request: request,
@@ -846,7 +909,7 @@ struct TaskCheckpointService {
         var journal = TaskCheckpointJournal(
             schemaVersion: TaskCheckpointJournal.schemaVersion,
             operationUUID: operationID,
-            productionsRootPath: configuration.rootURL.path,
+            productionsRootPath: configuration.productionsRootPath,
             taskID: request.taskID,
             stepID: request.unfinishedStep,
             timestamp: timestamp,
@@ -880,8 +943,8 @@ struct TaskCheckpointService {
         }
 
         do {
-            try requireSafeCanonicalFile(registryURL, root: configuration.rootURL, label: "Task Registry")
-            try requireSafeCanonicalFile(prepared.workspaceURL, root: configuration.rootURL, label: "Task Workspace")
+            try requireSafeCanonicalFile(registryURL, root: configuration.taskCheckpointRootURL, label: "Task Registry")
+            try requireSafeCanonicalFile(prepared.workspaceURL, root: configuration.taskCheckpointRootURL, label: "Task Workspace")
             let currentRegistry = try Data(contentsOf: registryURL)
             let currentWorkspace = try Data(contentsOf: prepared.workspaceURL)
             guard currentRegistry == prepared.registryData, currentWorkspace == prepared.workspaceData else {
@@ -970,20 +1033,21 @@ struct TaskCheckpointService {
             )
         }
         let historicalProof = journal.terminalState?.provesHistoricalCommit == true
-        guard configuration.rootURL.path == journal.productionsRootPath else {
+        guard TaskCheckpointCanonicalRoot.isExact(configuration.productionsRootPath),
+              TaskCheckpointUTF8.equal(configuration.productionsRootPath, journal.productionsRootPath) else {
             return inspectionUncertain(
                 journal: journal,
                 historicalProof: historicalProof,
                 diagnostic: "The supplied canonical Productions root does not match the immutable journal-bound root. No live target was read and no journal state was reconciled."
             )
         }
-        let registryURL = configuration.url(journal.registryPath)
-        let workspaceURL = configuration.url(journal.workspacePath)
+        let registryURL = configuration.taskCheckpointURL(journal.registryPath)
+        let workspaceURL = configuration.taskCheckpointURL(journal.workspacePath)
         let currentRegistry: Data
         let currentWorkspace: Data
         do {
-            try requireSafeCanonicalFile(registryURL, root: configuration.rootURL, label: "Task Registry")
-            try requireSafeCanonicalFile(workspaceURL, root: configuration.rootURL, label: "Task Workspace")
+            try requireSafeCanonicalFile(registryURL, root: configuration.taskCheckpointRootURL, label: "Task Registry")
+            try requireSafeCanonicalFile(workspaceURL, root: configuration.taskCheckpointRootURL, label: "Task Workspace")
             currentRegistry = try Data(contentsOf: registryURL)
             currentWorkspace = try Data(contentsOf: workspaceURL)
         } catch {
@@ -1036,8 +1100,8 @@ struct TaskCheckpointService {
         operationID: UUID,
         timestamp: Date
     ) throws -> TaskCheckpointPreparedTarget {
-        let registryURL = configuration.url(ProductionsPath.tasks.rawValue)
-        try requireSafeCanonicalFile(registryURL, root: configuration.rootURL, label: "Task Registry")
+        let registryURL = configuration.taskCheckpointURL(ProductionsPath.tasks.rawValue)
+        try requireSafeCanonicalFile(registryURL, root: configuration.taskCheckpointRootURL, label: "Task Registry")
         let registryData = try Data(contentsOf: registryURL)
         guard hash(registryData) == request.expectedRegistrySHA256 else {
             throw TaskCheckpointValidationError.hashMismatch("Task Registry SHA-256 does not match the authorized preimage.")
@@ -1048,8 +1112,8 @@ struct TaskCheckpointService {
         guard MarkdownTable.resolvedPath(row["Workspace"] ?? "", relativeTo: "Office/Registry") == workspacePath else {
             throw TaskCheckpointValidationError.targetContractInvalid("The Task Registry Workspace link is not the exact same-ID canonical record.")
         }
-        let workspaceURL = configuration.url(workspacePath)
-        try requireSafeCanonicalFile(workspaceURL, root: configuration.rootURL, label: "Task Workspace")
+        let workspaceURL = configuration.taskCheckpointURL(workspacePath)
+        try requireSafeCanonicalFile(workspaceURL, root: configuration.taskCheckpointRootURL, label: "Task Workspace")
         let workspaceData = try Data(contentsOf: workspaceURL)
         guard hash(workspaceData) == request.expectedWorkspaceSHA256 else {
             throw TaskCheckpointValidationError.hashMismatch("Task Workspace SHA-256 does not match the authorized preimage.")
@@ -1084,10 +1148,10 @@ struct TaskCheckpointService {
     }
 
     private func fullyValidatePostimage(journal: TaskCheckpointJournal, configuration: ProductionsConfiguration) throws -> String {
-        let registryURL = configuration.url(journal.registryPath)
-        let workspaceURL = configuration.url(journal.workspacePath)
-        try requireSafeCanonicalFile(registryURL, root: configuration.rootURL, label: "Task Registry")
-        try requireSafeCanonicalFile(workspaceURL, root: configuration.rootURL, label: "Task Workspace")
+        let registryURL = configuration.taskCheckpointURL(journal.registryPath)
+        let workspaceURL = configuration.taskCheckpointURL(journal.workspacePath)
+        try requireSafeCanonicalFile(registryURL, root: configuration.taskCheckpointRootURL, label: "Task Registry")
+        try requireSafeCanonicalFile(workspaceURL, root: configuration.taskCheckpointRootURL, label: "Task Workspace")
         let registryData = try Data(contentsOf: registryURL)
         guard registryData == journal.registryPreimage else {
             throw TaskCheckpointValidationError.targetContractInvalid("Task Registry changed after the checkpoint was prepared.")
@@ -1138,10 +1202,10 @@ struct TaskCheckpointService {
         let currentWorkspace: Data
         let currentRegistry: Data
         do {
-            try requireSafeCanonicalFile(configuration.url(journal.workspacePath), root: configuration.rootURL, label: "Task Workspace")
-            try requireSafeCanonicalFile(configuration.url(journal.registryPath), root: configuration.rootURL, label: "Task Registry")
-            currentWorkspace = try Data(contentsOf: configuration.url(journal.workspacePath))
-            currentRegistry = try Data(contentsOf: configuration.url(journal.registryPath))
+            try requireSafeCanonicalFile(configuration.taskCheckpointURL(journal.workspacePath), root: configuration.taskCheckpointRootURL, label: "Task Workspace")
+            try requireSafeCanonicalFile(configuration.taskCheckpointURL(journal.registryPath), root: configuration.taskCheckpointRootURL, label: "Task Registry")
+            currentWorkspace = try Data(contentsOf: configuration.taskCheckpointURL(journal.workspacePath))
+            currentRegistry = try Data(contentsOf: configuration.taskCheckpointURL(journal.registryPath))
         } catch {
             return try finishUncertain(
                 journal: &journal, request: request,
@@ -1396,13 +1460,19 @@ struct TaskCheckpointService {
     }
 
     private func requireSafeCanonicalFile(_ url: URL, root: URL, label: String) throws {
-        let rootPath = root.standardizedFileURL.path
-        let target = url.standardizedFileURL
-        guard target.path.hasPrefix(rootPath + "/") else {
+        let rootPath = root.path
+        let target = url
+        guard TaskCheckpointUTF8.hasPrefix(target.path, rootPath + "/") else {
             throw TaskCheckpointValidationError.targetContractInvalid("\(label) is outside the configured Productions root.")
         }
         var current = URL(fileURLWithPath: "/", isDirectory: true)
         for component in target.pathComponents.dropFirst() {
+            guard let entries = try? manager.contentsOfDirectory(atPath: current.path),
+                  entries.contains(where: { TaskCheckpointUTF8.equal($0, component) }) else {
+                throw TaskCheckpointValidationError.targetContractInvalid(
+                    "\(label) path does not use exact canonical spelling at \(current.appending(path: component).path)."
+                )
+            }
             current.append(path: component)
             if (try? manager.destinationOfSymbolicLink(atPath: current.path)) != nil {
                 throw TaskCheckpointValidationError.targetContractInvalid("\(label) path contains a symbolic link at \(current.path).")
@@ -1416,7 +1486,7 @@ struct TaskCheckpointService {
     }
 
     private func observeCanvas(taskID: String, configuration: ProductionsConfiguration) -> String {
-        guard let data = try? Data(contentsOf: configuration.url(ProductionsPath.canvas.rawValue)),
+        guard let data = try? Data(contentsOf: configuration.taskCheckpointURL(ProductionsPath.canvas.rawValue)),
               let parsed = try? CanvasMarkdown.parse(String(decoding: data, as: UTF8.self)),
               !parsed.isFragmented else { return "unknown" }
         let boundary = parsed.rows.last(where: { $0["Work ID"] == taskID && ["Placed", "Cleared"].contains($0["Event"] ?? "") })?["Event"]

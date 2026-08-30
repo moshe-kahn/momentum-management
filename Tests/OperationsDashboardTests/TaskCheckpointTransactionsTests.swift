@@ -343,6 +343,7 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
         let invocation = try HeadlessOfficeCommandLine.parse(Array(arguments.dropFirst()))
         guard case let .checkpoint(request, configuration) = invocation else { return XCTFail("Expected checkpoint invocation") }
         XCTAssertEqual(request.acceptedEvidence, ["Unit suite passed.", "Production adapter passed."])
+        XCTAssertEqual(configuration.productionsRootPath, fixture.root.path)
         XCTAssertEqual(configuration.rootURL, fixture.configuration.rootURL)
 
         var output: [String] = []
@@ -545,6 +546,146 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
             XCTAssertEqual(failure.result.classification, "targetContractInvalid")
             XCTAssertTrue(journal.values.isEmpty)
             XCTAssertEqual(try fixture.snapshot(), before)
+        }
+    }
+
+    func testPrivateTmpLiteralRootSurvivesFoundationStandardizationAndUnsafeAliasesRemainRejected() throws {
+        let manager = FileManager.default
+        let fixedHome = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appending(path: "TaskCheckpointFixedHome-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try manager.createDirectory(at: fixedHome, withIntermediateDirectories: false)
+        defer { try? manager.removeItem(at: fixedHome) }
+
+        let previousFixedHome = getenv("CFFIXED_USER_HOME").map { String(cString: $0) }
+        XCTAssertEqual(setenv("CFFIXED_USER_HOME", fixedHome.path, 1), 0)
+        defer {
+            if let previousFixedHome {
+                setenv("CFFIXED_USER_HOME", previousFixedHome, 1)
+            } else {
+                unsetenv("CFFIXED_USER_HOME")
+            }
+        }
+
+        let privateTmpRoot = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        let activationFixture = try ActivationFixture(rootParent: privateTmpRoot)
+        defer { activationFixture.remove() }
+        XCTAssertNoThrow(
+            try AdoptedOfficeV112ContractValidator().validate(configuration: activationFixture.configuration)
+        )
+
+        let normalizationDirectory = try NormalizationEquivalentDirectory(parent: privateTmpRoot)
+        defer { normalizationDirectory.remove() }
+        let fixture = try CheckpointFixture(rootParent: normalizationDirectory.canonicalURL)
+        defer { fixture.remove() }
+        let normalizationAlias = try normalizationDirectory.alias(for: fixture.root)
+        XCTAssertEqual(normalizationAlias, fixture.root.path)
+        XCTAssertFalse(normalizationAlias.utf8.elementsEqual(fixture.root.path.utf8))
+        let standardizedAlias = fixture.root.path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/", options: .anchored)
+        XCTAssertEqual(fixture.root.standardizedFileURL.path, standardizedAlias)
+        XCTAssertEqual(fixture.configuration.productionsRootPath, fixture.root.path)
+
+        let journal = CheckpointMemoryJournal()
+        let checkpointService = service(journal: journal)
+        var commandOutput: [String] = []
+        XCTAssertEqual(
+            HeadlessOfficeCommandLine.runIfRequested(
+                arguments: fixture.arguments(), service: checkpointService,
+                write: { commandOutput.append($0) }
+            ),
+            0
+        )
+        let committed = try decodeResult(commandOutput)
+        XCTAssertEqual(committed.outcome, "committed")
+        XCTAssertEqual(committed.classification, "committed-and-current")
+        XCTAssertTrue(try XCTUnwrap(journal.values.first?.productionsRootPath).utf8.elementsEqual(fixture.root.path.utf8))
+        XCTAssertEqual(
+            try checkpointService.inspect(operationID: operationID, configuration: fixture.configuration).classification,
+            "committed-and-current"
+        )
+        let frozenJournal = journal.values
+        for alias in [standardizedAlias, normalizationAlias] {
+            let aliasInspection = try checkpointService.inspect(
+                operationID: operationID,
+                configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: alias)
+            )
+            XCTAssertEqual(aliasInspection.classification, "historically-committed-current-state-uncertain", alias)
+            XCTAssertTrue(aliasInspection.historicalCommitProven, alias)
+        }
+        XCTAssertEqual(journal.values, frozenJournal)
+
+        let normalizationJournal = CheckpointMemoryJournal()
+        let normalizationService = service(journal: normalizationJournal)
+        var normalizationArguments = fixture.arguments()
+        let rootOption = try XCTUnwrap(normalizationArguments.firstIndex(of: "--productions-root"))
+        normalizationArguments[rootOption + 1] = normalizationAlias
+        let beforeNormalizationAttempt = try fixture.snapshot()
+        var normalizationOutput: [String] = []
+        XCTAssertEqual(
+            HeadlessOfficeCommandLine.runIfRequested(
+                arguments: normalizationArguments, service: normalizationService,
+                write: { normalizationOutput.append($0) }
+            ),
+            2
+        )
+        let normalizationFailure = try decodeResult(normalizationOutput)
+        XCTAssertEqual(normalizationFailure.outcome, "not-committed")
+        XCTAssertEqual(normalizationFailure.classification, "contractNotAdopted")
+        XCTAssertNil(normalizationFailure.operationUUID)
+        XCTAssertTrue(normalizationFailure.diagnostic?.contains("one exact absolute spelling") == true)
+        XCTAssertTrue(normalizationJournal.values.isEmpty)
+        XCTAssertEqual(try fixture.snapshot(), beforeNormalizationAttempt)
+
+        let lexicalAliases = [
+            fixture.root.path + "/",
+            fixture.root.path.replacingOccurrences(of: "/private/tmp/", with: "/private//tmp/", options: .anchored),
+            fixture.root.path.replacingOccurrences(of: "/private/tmp/", with: "/private/tmp/./", options: .anchored),
+            fixture.root.deletingLastPathComponent().path + "/unused/../" + fixture.root.lastPathComponent,
+            String(fixture.root.path.dropFirst()),
+        ]
+        for alias in lexicalAliases {
+            let aliasJournal = CheckpointMemoryJournal()
+            var issuedUUID = false
+            let aliasService = TaskCheckpointService(
+                journalStore: aliasJournal, contractValidator: AcceptingV112Validator(),
+                makeOperationID: { issuedUUID = true; return self.operationID }
+            )
+            let before = try fixture.snapshot()
+            let failure = try captureFailure {
+                try aliasService.perform(
+                    request: fixture.request(),
+                    configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: alias)
+                )
+            }
+            XCTAssertEqual(failure.result.classification, "contractNotAdopted", alias)
+            XCTAssertNil(failure.result.operationUUID, alias)
+            XCTAssertFalse(issuedUUID, alias)
+            XCTAssertTrue(aliasJournal.values.isEmpty, alias)
+            XCTAssertEqual(try fixture.snapshot(), before, alias)
+        }
+
+        let symlinkAlias = fixture.root.deletingLastPathComponent()
+            .appending(path: "TaskCheckpointAlias-\(UUID().uuidString)")
+        try manager.createSymbolicLink(at: symlinkAlias, withDestinationURL: fixture.root)
+        defer { try? manager.removeItem(at: symlinkAlias) }
+        let unsafeAliases = [
+            (standardizedAlias, "symbolic link"),
+            (symlinkAlias.path, "symbolic link"),
+            (fixture.root.path.replacingOccurrences(of: "/private/", with: "/Private/", options: .anchored), "exact canonical spelling"),
+        ]
+        for (alias, diagnosticFragment) in unsafeAliases {
+            let aliasJournal = CheckpointMemoryJournal()
+            let aliasService = service(journal: aliasJournal)
+            let before = try fixture.snapshot()
+            let failure = try captureFailure {
+                try aliasService.perform(
+                    request: fixture.request(),
+                    configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: alias)
+                )
+            }
+            XCTAssertEqual(failure.result.classification, "targetContractInvalid", alias)
+            XCTAssertTrue(failure.result.diagnostic?.contains(diagnosticFragment) == true, alias)
+            XCTAssertTrue(aliasJournal.values.isEmpty, alias)
+            XCTAssertEqual(try fixture.snapshot(), before, alias)
         }
     }
 
@@ -760,7 +901,11 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
     }
 
     func testDurableUpdatesRejectEveryImmutableEnvelopeSubstitutionAndPreserveFreshReaders() throws {
-        let fixture = try CheckpointFixture(); defer { fixture.remove() }
+        let normalizationDirectory = try NormalizationEquivalentDirectory()
+        defer { normalizationDirectory.remove() }
+        let fixture = try CheckpointFixture(rootParent: normalizationDirectory.canonicalURL)
+        defer { fixture.remove() }
+        let normalizationAlias = try normalizationDirectory.alias(for: fixture.root)
         let journalDirectory = fixture.root.deletingLastPathComponent()
             .appending(path: "TaskCheckpointImmutableEnvelope-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: journalDirectory) }
@@ -800,6 +945,42 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
             XCTAssertThrowsError(try store.recordFallback(proposed), name)
             XCTAssertEqual(try Data(contentsOf: journalURL), frozen, name)
         }
+
+        let normalizationUpdate = try mutatedJournal(durable) {
+            $0["productionsRootPath"] = normalizationAlias
+        }
+        XCTAssertEqual(normalizationUpdate.productionsRootPath, durable.productionsRootPath)
+        XCTAssertFalse(normalizationUpdate.productionsRootPath.utf8.elementsEqual(durable.productionsRootPath.utf8))
+        XCTAssertThrowsError(try store.update(normalizationUpdate), "normalization-equivalent root substitution")
+        XCTAssertEqual(try Data(contentsOf: journalURL), frozen)
+
+        let normalizationFallback = try mutatedJournal(durable) {
+            $0["productionsRootPath"] = normalizationAlias
+            $0["terminalState"] = OfficeWorkspaceTerminalState.journalFinalizationFailedCommittedAndCurrent.rawValue
+            $0["journalFinalized"] = false
+            $0["fallbackRecorded"] = true
+            $0["diagnostic"] = "Synthetic fallback must not substitute the immutable root envelope."
+        }
+        XCTAssertThrowsError(try store.recordFallback(normalizationFallback), "normalization-equivalent fallback root substitution")
+        XCTAssertEqual(try Data(contentsOf: journalURL), frozen)
+
+        let controlDirectory = fixture.root.deletingLastPathComponent()
+            .appending(path: "TaskCheckpointImmutableEnvelopeControl-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: controlDirectory) }
+        try FileManager.default.createDirectory(at: controlDirectory, withIntermediateDirectories: false)
+        let controlURL = controlDirectory.appending(path: "\(operationID.uuidString).json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(durable).write(to: controlURL)
+        let controlStore = ApplicationSupportTaskCheckpointJournalStore(directory: controlDirectory)
+        XCTAssertNoThrow(try controlStore.update(durable))
+        let exactFallback = try mutatedJournal(durable) {
+            $0["terminalState"] = OfficeWorkspaceTerminalState.journalFinalizationFailedCommittedAndCurrent.rawValue
+            $0["journalFinalized"] = false
+            $0["fallbackRecorded"] = true
+            $0["diagnostic"] = "Exact-envelope fallback control."
+        }
+        XCTAssertNoThrow(try controlStore.recordFallback(exactFallback))
 
         let freshInspector = TaskCheckpointService(
             journalStore: ApplicationSupportTaskCheckpointJournalStore(directory: journalDirectory),
@@ -1037,16 +1218,53 @@ private struct FIFOAfterWriteCheckpointReplacer: AtomicFileReplacing {
     }
 }
 
+private final class NormalizationEquivalentDirectory {
+    let canonicalURL: URL
+    let aliasParentPath: String
+    private let manager = FileManager.default
+
+    init(parent: URL = URL(fileURLWithPath: "/private/tmp", isDirectory: true)) throws {
+        let token = UUID().uuidString
+        let requestedName = "TaskCheckpoint-é-\(token)"
+        try manager.createDirectory(
+            at: parent.appending(path: requestedName, directoryHint: .isDirectory),
+            withIntermediateDirectories: false
+        )
+        let storedName = try XCTUnwrap(
+            manager.contentsOfDirectory(atPath: parent.path).first(where: { $0.hasSuffix(token) })
+        )
+        canonicalURL = parent.appending(path: storedName, directoryHint: .isDirectory)
+        let composed = storedName.precomposedStringWithCanonicalMapping
+        let decomposed = storedName.decomposedStringWithCanonicalMapping
+        let aliasName = storedName.utf8.elementsEqual(composed.utf8) ? decomposed : composed
+        guard !storedName.utf8.elementsEqual(aliasName.utf8) else { throw syntheticError(14) }
+        aliasParentPath = parent.path + "/" + aliasName
+    }
+
+    func alias(for child: URL) throws -> String {
+        let prefix = canonicalURL.path + "/"
+        guard child.path.utf8.starts(with: prefix.utf8) else { throw syntheticError(15) }
+        let suffix = String(decoding: child.path.utf8.dropFirst(prefix.utf8.count), as: UTF8.self)
+        return aliasParentPath + "/" + suffix
+    }
+
+    func remove() { try? manager.removeItem(at: canonicalURL) }
+}
+
 private final class CheckpointFixture {
     let root: URL
     private let manager = FileManager.default
     let existingEvidence: Bool
     let laterSections: Bool
 
-    init(existingEvidence: Bool = false, laterSections: Bool = false) throws {
+    init(
+        existingEvidence: Bool = false,
+        laterSections: Bool = false,
+        rootParent: URL? = nil
+    ) throws {
         self.existingEvidence = existingEvidence
         self.laterSections = laterSections
-        root = URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true)
+        root = (rootParent ?? URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true))
             .appending(path: "TaskCheckpointTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         try write(registry, to: registryURL)
         try write(workspace, to: workspaceURL)
@@ -1217,8 +1435,8 @@ private final class ActivationFixture {
     private let manager = FileManager.default
     private let liveRoot = URL(fileURLWithPath: "/Users/kahntra/Productions", isDirectory: true)
 
-    init() throws {
-        root = URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true)
+    init(rootParent: URL? = nil) throws {
+        root = (rootParent ?? URL(fileURLWithPath: manager.currentDirectoryPath, isDirectory: true))
             .appending(path: "TaskCheckpointActivationTests-\(UUID().uuidString)", directoryHint: .isDirectory)
         let paths = Array(AdoptedOfficeV112ContractValidator.immutableSHA256.keys) + [
             "Warehouse/Reference/Document Registry.md",

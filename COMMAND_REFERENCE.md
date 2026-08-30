@@ -48,6 +48,15 @@ OperationsDashboard office inspect \
   --productions-root <path> --operation <UUID>
 ```
 
+The Office surface binds the supplied root spelling as exact UTF-8 bytes, not
+Unicode-canonical-equivalent text. An exact
+canonical `/private/tmp/...` fixture root remains `/private/tmp/...` even when
+Foundation would standardize it to `/tmp/...`. Relative paths, dot segments,
+repeated or trailing separators, case variants, symbolic-link aliases, and
+other non-exact or escaping spellings are rejected; canonical containment and
+non-followed regular-file checks still apply to every governed target and
+reload.
+
 Checkpoint inputs bind the complete Task Registry and Workspace preimages. The
 transaction checks only the exact unfinished Step, replaces only complete
 `Next step` and `Last validated state` values, and appends one UUID-bound
