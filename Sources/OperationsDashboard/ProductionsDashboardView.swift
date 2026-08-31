@@ -84,7 +84,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
     func retryProblem(for payload: FlowItem) -> String? { guard let result = intakeResults.first(where: { $0.payloadPath == payload.location }) else { return nil }; switch result.outcome { case .problem, .investigationRequired, .suspended: return result.reason; case .deferred, .registered: return nil } }
     func registrationPreview(payload: FlowItem, metadata: FlowRegistrationMetadata) throws -> FlowRegistrationPreview { guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }; return try registrationService.preview(configuration: configuration, payload: payload, metadata: metadata) }
     func register(payload: FlowItem, metadata: FlowRegistrationMetadata, preview: FlowRegistrationPreview) throws { guard let configuration = state?.configuration else { throw FlowRegistrationError.ineligible("Choose a valid Productions root before registering Inbox items.") }; try registrationService.commit(configuration: configuration, payload: payload, metadata: metadata, preview: preview, expectedPayloadState: preview.payloadState) { ProductionsLoader(reader: self.reader).load(configuration: $0) }; readOnlyLoad(configuration) }
-    func performCanvasAction(_ action: CanvasWorkAction, work: WorkItem, reason: String, context: String) {
+    func performCanvasAction(_ action: CanvasWorkAction, work: WorkItem, reason: String, context: String, clearBasis: CanvasClearBasis? = nil) {
         guard let configuration = state?.configuration else { setMessage("Choose a valid Productions root before changing Canvas.", severity: .warning); return }
         do {
             let desiredState: CanvasDesiredState = action == .start ? .focused : .clear
@@ -94,6 +94,7 @@ final class ProductionsDashboardViewModel: ObservableObject {
                 work: work,
                 reason: reason,
                 context: context,
+                clearBasis: clearBasis,
                 reload: { ProductionsLoader(reader: self.reader).load(configuration: $0) }
             )
             readOnlyLoad(configuration)
@@ -520,7 +521,7 @@ private struct DetailView: View {
     let open: (String, Bool) -> Void
     let retry: (FlowItem) -> Void
     let problem: (FlowItem) -> String?
-    let canvasAction: (CanvasWorkAction, WorkItem, String, String) -> Void
+    let canvasAction: (CanvasWorkAction, WorkItem, String, String, CanvasClearBasis?) -> Void
     let prepare: (WorkItem, SessionAuthorizationMode, String, String) -> Void
     let bundlePrepare: (String, SessionAuthorizationMode, String, String) -> Void
     let copy: () -> Void
@@ -639,7 +640,7 @@ private struct WorkDetailView: View {
     let currentMemento: Memento?
     let sessionPackage: SessionPackage?
     let open: (String, Bool) -> Void
-    let perform: (CanvasWorkAction, WorkItem, String, String) -> Void
+    let perform: (CanvasWorkAction, WorkItem, String, String, CanvasClearBasis?) -> Void
     let prepare: (WorkItem, SessionAuthorizationMode, String, String) -> Void
     let copy: () -> Void
     let mementoAction: (MementoTransactionAction, WorkItem, MementoDraft?) -> Void
@@ -715,8 +716,8 @@ private struct WorkDetailView: View {
             CanonicalRecordDisclosure(content: work.content)
         }
         .sheet(item: $pendingAction) { action in
-            CanvasWorkActionSheet(action: action, work: work, isOnCanvas: isOnCanvas) { reason, context in
-                perform(action, work, reason, context)
+            CanvasWorkActionSheet(action: action, work: work, isOnCanvas: isOnCanvas) { reason, context, clearBasis in
+                perform(action, work, reason, context, clearBasis)
                 pendingAction = nil
             } cancel: {
                 pendingAction = nil
@@ -1060,12 +1061,13 @@ private struct CanvasWorkActionSheet: View {
     let action: CanvasWorkAction
     let work: WorkItem
     let isOnCanvas: Bool
-    let confirm: (String, String) -> Void
+    let confirm: (String, String, CanvasClearBasis?) -> Void
     let cancel: () -> Void
     @State private var reason: String
     @State private var context: String
+    @State private var clearBasis: CanvasClearBasis?
 
-    init(action: CanvasWorkAction, work: WorkItem, isOnCanvas: Bool, confirm: @escaping (String, String) -> Void, cancel: @escaping () -> Void) {
+    init(action: CanvasWorkAction, work: WorkItem, isOnCanvas: Bool, confirm: @escaping (String, String, CanvasClearBasis?) -> Void, cancel: @escaping () -> Void) {
         self.action = action
         self.work = work
         self.isOnCanvas = isOnCanvas
@@ -1073,6 +1075,7 @@ private struct CanvasWorkActionSheet: View {
         self.cancel = cancel
         _reason = State(initialValue: action == .start ? "Intentional work started." : "Deferral.")
         _context = State(initialValue: action == .start ? "Work explicitly selected in Momentum Management." : "Work intentionally cleared from current attention.")
+        _clearBasis = State(initialValue: nil)
     }
 
     var body: some View {
@@ -1088,20 +1091,41 @@ private struct CanvasWorkActionSheet: View {
                     } else {
                         Label(isOnCanvas ? "Canvas change: append Cleared." : "Already clear: no Canvas event will be appended.", systemImage: "rectangle.slash")
                         Text("Clear does not change Registry lifecycle or priority and does not create or resolve a Memento.")
+                        if CanvasContinuityPresentation.requiresTaskClearBasis(action: action, kind: work.kind) {
+                            Text(CanvasContinuityPresentation.taskClearExplanation)
+                        }
                     }
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if CanvasContinuityPresentation.requiresTaskClearBasis(action: action, kind: work.kind) {
+                LabeledContent("Task clear basis · Required") {
+                    Picker("Task clear basis", selection: $clearBasis) {
+                        Text("Choose a basis").tag(nil as CanvasClearBasis?)
+                        ForEach(CanvasContinuityPresentation.clearBasisOptions(action: action, kind: work.kind), id: \.self) { basis in
+                            Text(basis.rawValue).tag(Optional(basis))
+                        }
+                    }
+                    .frame(minWidth: 320)
+                    .accessibilityLabel("Task clear basis, required")
+                    .accessibilityValue(clearBasis?.rawValue ?? "Not selected")
+                    .accessibilityHint(CanvasContinuityPresentation.taskClearExplanation)
+                }
+            }
             LabeledContent("Reason · Required") { TextField("Reason", text: $reason).frame(minWidth: 320) }
             LabeledContent("Context · Required") { TextField("Context", text: $context).frame(minWidth: 320) }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { cancel() }
-                Button(actionTitle) { confirm(reason, context) }
+                Button(actionTitle) { confirm(reason, context, clearBasis) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(
+                        reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || (CanvasContinuityPresentation.requiresTaskClearBasis(action: action, kind: work.kind) && clearBasis == nil)
+                    )
             }
         }
         .padding()

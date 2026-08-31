@@ -54,11 +54,11 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
         XCTAssertEqual(preview.action, .start); XCTAssertEqual(preview.targetID, "TASK-000001")
         XCTAssertEqual(preview.reason, draft.reason); XCTAssertEqual(preview.context, draft.context)
         let variants = [
-            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot + "-other", action: preview.action, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, canvasSHA256: preview.canvasSHA256),
-            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: .stop, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, canvasSHA256: preview.canvasSHA256),
-            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: preview.action, targetID: "TASK-999999", targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, canvasSHA256: preview.canvasSHA256),
-            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: preview.action, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: "Changed context.", canvasSHA256: preview.canvasSHA256),
-            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: preview.action, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, canvasSHA256: "changed")
+            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot + "-other", action: preview.action, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, clearBasis: preview.clearBasis, canvasSHA256: preview.canvasSHA256),
+            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: .stop, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, clearBasis: .ownerStop, canvasSHA256: preview.canvasSHA256),
+            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: preview.action, targetID: "TASK-999999", targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, clearBasis: preview.clearBasis, canvasSHA256: preview.canvasSHA256),
+            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: preview.action, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: "Changed context.", clearBasis: preview.clearBasis, canvasSHA256: preview.canvasSHA256),
+            CanvasCommandPreview(schemaVersion: preview.schemaVersion, productionsRoot: preview.productionsRoot, action: preview.action, targetID: preview.targetID, targetTitle: preview.targetTitle, reason: preview.reason, context: preview.context, clearBasis: preview.clearBasis, canvasSHA256: "changed")
         ]
         XCTAssertTrue(try variants.allSatisfy { try ConfirmedCommand.token(preview: $0) != token })
         let changedReason = HeadlessCanvasCommand(action: .start, workID: draft.workID, reason: "Changed reason.", context: draft.context, confirmation: ConfirmedCommand(confirmation: token))
@@ -200,11 +200,11 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
 
         output.removeAll()
         XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: attentionArguments("clear", root: fixture.root.path), attentionAdapter: attentionAdapter, write: { output.append($0) }), 0)
-        XCTAssertEqual(output, ["Cleared TASK-000001. \(operationSuffix)"])
+        XCTAssertEqual(output, ["Cleared TASK-000001 for owner-stop. \(operationSuffix)"])
 
         output.removeAll()
         XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: attentionArguments("clear", root: fixture.root.path), attentionAdapter: attentionAdapter, write: { output.append($0) }), 0)
-        XCTAssertEqual(output, ["TASK-000001 is already clear; no Canvas event was appended. \(operationSuffix)"])
+        XCTAssertEqual(output, ["TASK-000001 is already clear for owner-stop; no Canvas event was appended. \(operationSuffix)"])
     }
 
     func testNormalCommitJournalFinalizationFailureIsExitThreeCurrentNoRetryAndTerminalFallback() throws {
@@ -612,12 +612,191 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
         XCTAssertNotEqual(diagnostic.reconciliation, "not-committed")
     }
 
-    func testPreviewConfirmedStartAndStopCompatibilitySurfaceRemainsUnchanged() throws {
+    func testAdaptersRejectInvalidTaskBasisShapeBeforeReadersUUIDsLocksJournalsOrWrites() throws {
+        let reader = CommandFailIfReadReader()
+        let journal = CommandJournal()
+        let lock = CommandCountingLock()
+        let replacer = CommandCountingReplacer()
+        var generatedOperationIDs = 0
+        let canvas = CanvasWorkTransactionService(
+            journalStore: journal,
+            replacer: replacer,
+            locking: lock,
+            now: { self.date },
+            makeOperationID: { generatedOperationIDs += 1; return UUID() }
+        )
+        let attention = CanvasAttentionOperationService(
+            canvas: canvas,
+            makeOperationID: { generatedOperationIDs += 1; return UUID() }
+        )
+        let attentionAdapter = HeadlessCanvasAttentionCommandAdapter(attention: attention, reader: reader)
+        let compatibilityAdapter = HeadlessCanvasCommandAdapter(canvas: canvas, reader: reader)
+        let configuration = ProductionsConfiguration(schemaVersion: 2, productionsRootPath: "/private/tmp/task-0076-shape-must-not-read")
+
+        for command in [
+            HeadlessCanvasAttentionCommand(desiredState: .clear, workID: "TASK-000001", reason: "Session stopped.", context: "Routine handoff."),
+            HeadlessCanvasAttentionCommand(desiredState: .focused, workID: "TASK-000001", reason: "Continue.", context: "Routine phase.", clearBasis: .ownerStop),
+        ] {
+            XCTAssertThrowsError(try attentionAdapter.execute(command, configuration: configuration)) { error in
+                XCTAssertTrue([CanvasContinuityPolicyError.clearBasisRequired, .clearBasisForbiddenForFocus].contains(error as? CanvasContinuityPolicyError))
+            }
+        }
+
+        for command in [
+            HeadlessCanvasCommand(action: .stop, workID: "TASK-000001", reason: "Session stopped.", context: "Routine handoff."),
+            HeadlessCanvasCommand(action: .start, workID: "TASK-000001", reason: "Continue.", context: "Routine phase.", clearBasis: .ownerStop),
+        ] {
+            XCTAssertThrowsError(try compatibilityAdapter.preview(for: command, configuration: configuration))
+            let execution = HeadlessCanvasCommand(
+                action: command.action,
+                workID: command.workID,
+                reason: command.reason,
+                context: command.context,
+                clearBasis: command.clearBasis,
+                confirmation: ConfirmedCommand(confirmation: "must-not-be-read")
+            )
+            XCTAssertThrowsError(try compatibilityAdapter.execute(execution, configuration: configuration))
+        }
+
+        XCTAssertEqual(reader.calls, 0)
+        XCTAssertEqual(generatedOperationIDs, 0)
+        XCTAssertEqual(lock.attempts, 0)
+        XCTAssertTrue(journal.journals.isEmpty)
+        XCTAssertEqual(replacer.writes, 0)
+    }
+
+    func testTaskContinuityBasisDoesNotBroadenIdeaProjectOrInitiativeAttention() throws {
+        let cases: [(WorkKind, String, String)] = [
+            (.idea, "IDEA-000001", "Open"),
+            (.project, "PROJ-000001", "Active / Current"),
+            (.initiative, "INIT-000001", "Done / Complete"),
+        ]
+
+        for (kind, workID, lifecycle) in cases {
+            XCTAssertNoThrow(try CanvasContinuityPolicy.validateShape(desiredState: .clear, clearBasis: nil, workID: workID))
+            XCTAssertNoThrow(try CanvasContinuityPolicy.validate(desiredState: .clear, clearBasis: nil, kind: kind, lifecycle: lifecycle))
+            XCTAssertThrowsError(try CanvasContinuityPolicy.validateShape(desiredState: .clear, clearBasis: .ownerStop, workID: workID)) { error in
+                XCTAssertEqual(error as? CanvasContinuityPolicyError, .clearBasisForbiddenForNonTask)
+            }
+
+            let invocation = try HeadlessCanvasCommandLine.parse([
+                "canvas", "preview", "stop", "--productions-root", "/private/tmp/synthetic",
+                "--work", workID, "--reason", "Preserve accepted behavior.", "--context", "Non-Task attention."
+            ])
+            guard case let .preview(command, _) = invocation else { return XCTFail("Expected preview invocation") }
+            XCTAssertNil(command.clearBasis)
+        }
+    }
+
+    func testClearCLIRejectsMissingUnknownSessionAndFocusBasesBeforeUUIDOrWrite() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try fixture.snapshot()
+        let journal = CommandJournal()
+        var generatedOperationID = false
+        let attention = CanvasAttentionOperationService(
+            canvas: CanvasWorkTransactionService(journalStore: journal, now: { self.date }),
+            makeOperationID: { generatedOperationID = true; return UUID() }
+        )
+        let attentionAdapter = HeadlessCanvasAttentionCommandAdapter(attention: attention)
+        let prefix = ["OperationsDashboard", "canvas"]
+        let suffix = ["--productions-root", fixture.root.path, "--work", "TASK-000001", "--reason", "Routine handoff.", "--context", "Session ended."]
+        let cases = [
+            prefix + ["clear"] + suffix,
+            prefix + ["clear", "--clear-basis", "unknown"] + suffix,
+            prefix + ["clear", "--clear-basis", "session-stop"] + suffix,
+            prefix + ["focus", "--clear-basis", "owner-stop"] + suffix,
+        ]
+
+        for arguments in cases {
+            var output: [String] = []
+            XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: arguments, attentionAdapter: attentionAdapter, write: { output.append($0) }), 2)
+            XCTAssertTrue(output.joined().contains("Usage:"), output.joined())
+        }
+
+        XCTAssertFalse(generatedOperationID)
+        XCTAssertTrue(journal.journals.isEmpty)
+        XCTAssertEqual(try fixture.snapshot(), before)
+    }
+
+    func testClearBasisIsBoundToJournalInspectionAuditContextAndConfirmationToken() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let ownerPause = HeadlessCanvasCommand(action: .stop, workID: "TASK-000001", reason: "Owner paused.", context: "Resume on owner direction.", clearBasis: .ownerPause)
+        let pausePreview = try adapter().preview(for: ownerPause, configuration: configuration(fixture))
+        let ownerStopPreview = try adapter().preview(
+            for: HeadlessCanvasCommand(action: .stop, workID: ownerPause.workID, reason: ownerPause.reason, context: ownerPause.context, clearBasis: .ownerStop),
+            configuration: configuration(fixture)
+        )
+        XCTAssertEqual(pausePreview.schemaVersion, 2)
+        XCTAssertEqual(pausePreview.clearBasis, .ownerPause)
+        XCTAssertNotEqual(try ConfirmedCommand.token(preview: pausePreview), try ConfirmedCommand.token(preview: ownerStopPreview))
+
+        let journal = CommandJournal()
+        let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000002076")!
+        let attention = CanvasAttentionOperationService(
+            canvas: CanvasWorkTransactionService(journalStore: journal, now: { self.date }),
+            retryPolicy: .init(maximumAttempts: 1, delay: 0),
+            sleep: { _ in },
+            makeOperationID: { operationID }
+        )
+        let attentionAdapter = HeadlessCanvasAttentionCommandAdapter(attention: attention)
+        var output: [String] = []
+
+        XCTAssertEqual(
+            HeadlessCanvasCommandLine.runIfRequested(
+                arguments: ["OperationsDashboard", "canvas", "clear", "--productions-root", fixture.root.path, "--work", "TASK-000001", "--clear-basis", "owner-pause", "--reason", "Owner paused.", "--context", "Resume on owner direction."],
+                attentionAdapter: attentionAdapter,
+                write: { output.append($0) }
+            ),
+            0
+        )
+        XCTAssertEqual(output, ["Cleared TASK-000001 for owner-pause. Operation \(operationID.uuidString)."])
+        XCTAssertEqual(journal.journals.last?.clearBasis, .ownerPause)
+        XCTAssertEqual(journal.journals.last?.context, "Canvas clear basis: owner-pause. Resume on owner direction.")
+        let diagnostic = try inspect(operationID: operationID, fixture: fixture, adapter: attentionAdapter)
+        XCTAssertEqual(diagnostic.clearBasis, .ownerPause)
+        XCTAssertTrue(diagnostic.historicalCommitProven)
+    }
+
+    func testPreviewConfirmedStartRemainsAndStopRequiresBoundClearBasis() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         var output: [String] = []
         XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: ["OperationsDashboard", "canvas", "preview", "start", "--productions-root", fixture.root.path, "--work", "TASK-000001", "--reason", "Approved action.", "--context", "Command test."], write: { output.append($0) }), 0)
         XCTAssertTrue(output.joined().contains("confirmationToken"))
         XCTAssertTrue(output.joined().contains("canvasSHA256"))
+
+        output.removeAll()
+        let stop = ["OperationsDashboard", "canvas", "preview", "stop", "--productions-root", fixture.root.path, "--work", "TASK-000001", "--reason", "Owner paused.", "--context", "Resume later."]
+        XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: stop, write: { output.append($0) }), 2)
+        XCTAssertTrue(output.joined().contains("Usage:"))
+
+        output.removeAll()
+        XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: stop + ["--clear-basis", "owner-pause"], write: { output.append($0) }), 0)
+        XCTAssertTrue(output.joined().contains("\"clearBasis\":\"owner-pause\""), output.joined())
+    }
+
+    func testCompatibilityPreviewJSONExactlyOmitsStartBasisAndEncodesTaskStopBasis() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let productionAdapter = adapter()
+
+        for command in [
+            HeadlessCanvasCommand(action: .start, workID: "TASK-000001", reason: "Approved action.", context: "Command test."),
+            HeadlessCanvasCommand(action: .stop, workID: "TASK-000001", reason: "Owner paused.", context: "Resume later.", clearBasis: .ownerPause),
+        ] {
+            let preview = try productionAdapter.preview(for: command, configuration: configuration(fixture))
+            let token = try ConfirmedCommand.token(preview: preview)
+            var arguments = ["OperationsDashboard", "canvas", "preview", command.action.rawValue, "--productions-root", fixture.root.path, "--work", command.workID]
+            if let basis = command.clearBasis { arguments += ["--clear-basis", basis.rawValue] }
+            arguments += ["--reason", command.reason, "--context", command.context]
+            var output: [String] = []
+
+            XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: arguments, adapter: productionAdapter, write: { output.append($0) }), 0)
+            XCTAssertEqual(output, [try exactPreviewJSON(preview, token: token)])
+            if command.action == .start {
+                XCTAssertFalse(try XCTUnwrap(output.first).contains("\"clearBasis\""))
+            } else {
+                XCTAssertTrue(try XCTUnwrap(output.first).contains("\"clearBasis\":\"owner-pause\""))
+            }
+        }
     }
 
     func testPreviewOutputIncludesConfirmationTokenAndNoArgumentLaunchIsUntouched() throws {
@@ -631,10 +810,31 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
 
     private var emptyCanvas: String { "| Occurred | Work ID | Event | Reason | Context |\n| --- | --- | --- | --- | --- |" }
     private func configuration(_ fixture: SyntheticProductionsFixture) -> ProductionsConfiguration { ProductionsConfiguration(schemaVersion: 2, productionsRootPath: fixture.root.path) }
-    private func command(_ action: CanvasWorkAction) -> HeadlessCanvasCommand { HeadlessCanvasCommand(action: action, workID: "TASK-000001", reason: "Approved action.", context: "Command test.") }
-    private func confirmedCommand(_ action: CanvasWorkAction, fixture: SyntheticProductionsFixture) throws -> HeadlessCanvasCommand { let draft = command(action); let preview = try adapter().preview(for: draft, configuration: configuration(fixture)); return HeadlessCanvasCommand(action: draft.action, workID: draft.workID, reason: draft.reason, context: draft.context, confirmation: ConfirmedCommand(confirmation: try ConfirmedCommand.token(preview: preview))) }
-    private func arguments(for command: HeadlessCanvasCommand, root: String, confirmation: String) -> [String] { ["OperationsDashboard", "canvas", command.action.rawValue, "--productions-root", root, "--work", command.workID, "--reason", command.reason, "--context", command.context, "--confirm", confirmation] }
-    private func attentionArguments(_ action: String, root: String) -> [String] { ["OperationsDashboard", "canvas", action, "--productions-root", root, "--work", "TASK-000001", "--reason", "Approved action.", "--context", "Command test."] }
+    private func command(_ action: CanvasWorkAction) -> HeadlessCanvasCommand { HeadlessCanvasCommand(action: action, workID: "TASK-000001", reason: "Approved action.", context: "Command test.", clearBasis: action == .stop ? .ownerStop : nil) }
+    private func confirmedCommand(_ action: CanvasWorkAction, fixture: SyntheticProductionsFixture) throws -> HeadlessCanvasCommand { let draft = command(action); let preview = try adapter().preview(for: draft, configuration: configuration(fixture)); return HeadlessCanvasCommand(action: draft.action, workID: draft.workID, reason: draft.reason, context: draft.context, clearBasis: draft.clearBasis, confirmation: ConfirmedCommand(confirmation: try ConfirmedCommand.token(preview: preview))) }
+    private func arguments(for command: HeadlessCanvasCommand, root: String, confirmation: String) -> [String] { var result = ["OperationsDashboard", "canvas", command.action.rawValue, "--productions-root", root, "--work", command.workID]; if let basis = command.clearBasis { result += ["--clear-basis", basis.rawValue] }; result += ["--reason", command.reason, "--context", command.context, "--confirm", confirmation]; return result }
+    private func attentionArguments(_ action: String, root: String) -> [String] { var result = ["OperationsDashboard", "canvas", action, "--productions-root", root, "--work", "TASK-000001"]; if action == "clear" { result += ["--clear-basis", CanvasClearBasis.ownerStop.rawValue] }; result += ["--reason", "Approved action.", "--context", "Command test."]; return result }
+    private func exactPreviewJSON(_ preview: CanvasCommandPreview, token: String) throws -> String {
+        let encode: (String) throws -> String = { value in
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            return String(decoding: try encoder.encode(value), as: UTF8.self)
+        }
+        var fields = [
+            "\"action\":\(try encode(preview.action.rawValue))",
+            "\"canvasSHA256\":\(try encode(preview.canvasSHA256))",
+        ]
+        if let clearBasis = preview.clearBasis { fields.append("\"clearBasis\":\(try encode(clearBasis.rawValue))") }
+        fields += [
+            "\"context\":\(try encode(preview.context))",
+            "\"productionsRoot\":\(try encode(preview.productionsRoot))",
+            "\"reason\":\(try encode(preview.reason))",
+            "\"schemaVersion\":\(preview.schemaVersion)",
+            "\"targetID\":\(try encode(preview.targetID))",
+            "\"targetTitle\":\(try encode(preview.targetTitle))",
+        ]
+        return "{\"confirmationToken\":\(try encode(token)),\"preview\":{\(fields.joined(separator: ","))}}"
+    }
     private func inspect(operationID: UUID, fixture: SyntheticProductionsFixture, adapter: HeadlessCanvasAttentionCommandAdapter) throws -> CanvasAttentionOperationDiagnostic {
         var output: [String] = []
         let arguments = ["OperationsDashboard", "canvas", "inspect", "--productions-root", fixture.root.path, "--operation", operationID.uuidString]
@@ -723,6 +923,24 @@ private final class CommandJournal: CanvasWorkTransactionJournalStore {
         onJournalRead?()
         return journals.first { $0.transactionID == transactionID }
     }
+}
+private final class CommandFailIfReadReader: ProductionsReading {
+    private(set) var calls = 0
+    private func touched() { calls += 1 }
+    func exists(at url: URL) -> Bool { touched(); return false }
+    func isReadable(at url: URL) -> Bool { touched(); return false }
+    func isSymbolicLink(at url: URL) throws -> Bool { touched(); throw NSError(domain: "HeadlessCanvasCommandsTests", code: 70) }
+    func isDirectory(at url: URL) throws -> Bool { touched(); throw NSError(domain: "HeadlessCanvasCommandsTests", code: 71) }
+    func directoryEntries(at url: URL) throws -> [FileSystemEntry] { touched(); throw NSError(domain: "HeadlessCanvasCommandsTests", code: 72) }
+    func readData(at url: URL) throws -> Data { touched(); throw NSError(domain: "HeadlessCanvasCommandsTests", code: 73) }
+}
+private final class CommandCountingLock: CanvasWorkTransactionLocking {
+    private(set) var attempts = 0
+    func acquire(canvasURL: URL) -> AnyObject? { attempts += 1; return NSObject() }
+}
+private final class CommandCountingReplacer: AtomicFileReplacing {
+    private(set) var writes = 0
+    func replace(data: Data, at target: URL) throws { writes += 1 }
 }
 private struct CommandDeniedLock: CanvasWorkTransactionLocking { func acquire(canvasURL: URL) -> AnyObject? { nil } }
 private struct CommandFailingReplacer: AtomicFileReplacing { func replace(data: Data, at target: URL) throws { throw NSError(domain: "HeadlessCanvasCommandsTests", code: 2) } }

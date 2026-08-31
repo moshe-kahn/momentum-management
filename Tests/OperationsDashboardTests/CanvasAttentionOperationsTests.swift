@@ -6,6 +6,123 @@ final class CanvasAttentionOperationsTests: XCTestCase {
     private let date = ISO8601DateFormatter().date(from: "2026-08-27T18:00:00Z")!
     private let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000076")!
 
+    func testSessionStopReviewCheckpointAndRoutinePhaseCannotClearTaskAttention() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try fixture.data(at: ProductionsPath.canvas.rawValue)
+        let journal = AttentionJournal()
+        var generatedOperationID = false
+        let service = CanvasAttentionOperationService(
+            canvas: CanvasWorkTransactionService(journalStore: journal, now: { self.date }),
+            makeOperationID: { generatedOperationID = true; return self.operationID }
+        )
+
+        for context in ["Session stopped.", "Independent review handoff.", "Checkpoint administration.", "Routine next phase."] {
+            XCTAssertThrowsError(
+                try service.perform(
+                    desiredState: .clear,
+                    configuration: fixture.configuration,
+                    work: task(fixture),
+                    reason: "Routine boundary.",
+                    context: context,
+                    reload: { _ in fixture.load() }
+                )
+            ) { error in
+                XCTAssertEqual(error as? CanvasContinuityPolicyError, .clearBasisRequired)
+            }
+        }
+
+        XCTAssertFalse(generatedOperationID)
+        XCTAssertTrue(journal.journals.isEmpty)
+        XCTAssertEqual(try fixture.data(at: ProductionsPath.canvas.rawValue), before)
+        XCTAssertTrue(fixture.load().canvasCurrentIDs.contains("TASK-000001"))
+    }
+
+    func testActiveOwnerPursuitRemainsCurrentAcrossRoutinePhaseChain() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try rows(fixture)
+        let journal = AttentionJournal()
+        let service = attention(journal: journal)
+
+        for context in ["Implementation.", "Independent review.", "Canonical checkpoint.", "Next routine phase."] {
+            let result = try service.perform(
+                desiredState: .focused,
+                configuration: fixture.configuration,
+                work: task(fixture),
+                reason: "Continue active owner pursuit.",
+                context: context,
+                reload: { _ in fixture.load() }
+            )
+            XCTAssertEqual(result.disposition, .alreadyDesired)
+            XCTAssertTrue(result.appendedEvents.isEmpty)
+        }
+
+        XCTAssertEqual(try rows(fixture), before)
+        XCTAssertTrue(fixture.load().canvasCurrentIDs.contains("TASK-000001"))
+        XCTAssertEqual(journal.journals.count, 4)
+        XCTAssertTrue(journal.journals.allSatisfy { $0.terminalState == .alreadyDesired && $0.action == .start })
+    }
+
+    func testEveryAllowedClearBasisIsDurablyAuditable() throws {
+        let cases: [(CanvasClearBasis, String)] = [
+            (.ownerPause, "Active / Current"),
+            (.ownerStop, "Active / Current"),
+            (.completed, "Done / Complete"),
+            (.obsolete, "Done / Obsolete"),
+            (.indefiniteExternalWait, "Active / Blocked"),
+        ]
+
+        for (basis, lifecycle) in cases {
+            let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+            try replaceLifecycle(lifecycle, fixture: fixture)
+            let journal = AttentionJournal()
+            let result = try attention(journal: journal).perform(
+                desiredState: .clear,
+                configuration: fixture.configuration,
+                work: task(fixture),
+                reason: "Owner-authorized task boundary.",
+                context: "Continuity regression.",
+                clearBasis: basis,
+                reload: { _ in fixture.load() }
+            )
+
+            XCTAssertEqual(result.clearBasis, basis)
+            XCTAssertEqual(result.appendedEvents, ["Cleared"])
+            XCTAssertEqual(journal.journals.last?.clearBasis, basis)
+            XCTAssertEqual(try rows(fixture).last?["Context"], "\(basis.auditContextPrefix) Continuity regression.")
+        }
+    }
+
+    func testTerminalClearBasisMustMatchCanonicalLifecycleBeforeJournal() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try fixture.data(at: ProductionsPath.canvas.rawValue)
+        let journal = AttentionJournal()
+        var generatedOperationID = false
+        let service = CanvasAttentionOperationService(
+            canvas: CanvasWorkTransactionService(journalStore: journal, now: { self.date }),
+            makeOperationID: { generatedOperationID = true; return self.operationID }
+        )
+
+        for basis in [CanvasClearBasis.completed, .obsolete] {
+            XCTAssertThrowsError(
+                try service.perform(
+                    desiredState: .clear,
+                    configuration: fixture.configuration,
+                    work: task(fixture),
+                    reason: "Invalid terminal boundary.",
+                    context: "Continuity regression.",
+                    clearBasis: basis,
+                    reload: { _ in fixture.load() }
+                )
+            ) { error in
+                XCTAssertEqual(error as? CanvasContinuityPolicyError, .lifecycleMismatch(basis, "Active / Current"))
+            }
+        }
+
+        XCTAssertFalse(generatedOperationID)
+        XCTAssertTrue(journal.journals.isEmpty)
+        XCTAssertEqual(try fixture.data(at: ProductionsPath.canvas.rawValue), before)
+    }
+
     func testFocusAndClearAreIdempotentDesiredStateOperations() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         fixture.replaceCanvas(emptyCanvas)
@@ -21,12 +138,15 @@ final class CanvasAttentionOperationsTests: XCTestCase {
         XCTAssertEqual(focusedAgain.disposition, .alreadyDesired)
         XCTAssertEqual(try rows(fixture).count, rowCount)
 
-        let cleared = try service.perform(desiredState: .clear, configuration: fixture.configuration, work: task(fixture), reason: "Clear.", context: "Test.", reload: { _ in fixture.load() })
+        let cleared = try service.perform(desiredState: .clear, configuration: fixture.configuration, work: task(fixture), reason: "Clear.", context: "Test.", clearBasis: .ownerStop, reload: { _ in fixture.load() })
         let clearedCount = try rows(fixture).count
-        let clearedAgain = try service.perform(desiredState: .clear, configuration: fixture.configuration, work: task(fixture), reason: "Clear.", context: "Test.", reload: { _ in fixture.load() })
+        let clearedAgain = try service.perform(desiredState: .clear, configuration: fixture.configuration, work: task(fixture), reason: "Clear.", context: "Test.", clearBasis: .ownerStop, reload: { _ in fixture.load() })
 
         XCTAssertEqual(cleared.disposition, .changed)
         XCTAssertEqual(cleared.appendedEvents, ["Cleared"])
+        XCTAssertEqual(cleared.clearBasis, .ownerStop)
+        XCTAssertEqual(journal.journals.last?.clearBasis, .ownerStop)
+        XCTAssertTrue(journal.journals.last?.context?.hasPrefix("Canvas clear basis: owner-stop.") == true)
         XCTAssertEqual(clearedAgain.disposition, .alreadyDesired)
         XCTAssertEqual(try rows(fixture).count, clearedCount)
     }
@@ -272,6 +392,12 @@ final class CanvasAttentionOperationsTests: XCTestCase {
     private func rows(_ fixture: SyntheticProductionsFixture) throws -> [[String: String]] { try MarkdownTable.parse(String(decoding: fixture.data(at: ProductionsPath.canvas.rawValue), as: UTF8.self), required: CanvasMarkdown.headers) }
     private func attention(journal: AttentionJournal) -> CanvasAttentionOperationService {
         CanvasAttentionOperationService(canvas: CanvasWorkTransactionService(journalStore: journal, now: { self.date }), retryPolicy: .init(maximumAttempts: 1, delay: 0), sleep: { _ in }, makeOperationID: { self.operationID })
+    }
+
+    private func replaceLifecycle(_ lifecycle: String, fixture: SyntheticProductionsFixture) throws {
+        let path = ProductionsPath.tasks.rawValue
+        let current = String(decoding: try fixture.data(at: path), as: UTF8.self)
+        try fixture.add(current.replacingOccurrences(of: "Active / Current", with: lifecycle), at: path)
     }
 }
 

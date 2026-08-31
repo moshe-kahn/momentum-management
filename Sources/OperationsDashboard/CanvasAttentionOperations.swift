@@ -14,6 +14,90 @@ struct CanvasLockRetryPolicy: Equatable {
     static let ordinary = CanvasLockRetryPolicy(maximumAttempts: 4, delay: 0.15)
 }
 
+/// The complete set of owner-level conditions that can end task-level Canvas
+/// attention. A working session ending, a review handoff, a checkpoint, or a
+/// routine next phase is deliberately not represented here.
+enum CanvasClearBasis: String, Codable, CaseIterable, Equatable {
+    case ownerPause = "owner-pause"
+    case ownerStop = "owner-stop"
+    case completed
+    case obsolete
+    case indefiniteExternalWait = "indefinite-external-wait"
+
+    var auditContextPrefix: String { "Canvas clear basis: \(rawValue)." }
+}
+
+enum CanvasContinuityPolicyError: LocalizedError, Equatable {
+    case clearBasisRequired
+    case clearBasisForbiddenForFocus
+    case clearBasisForbiddenForNonTask
+    case lifecycleMismatch(CanvasClearBasis, String)
+
+    var errorDescription: String? {
+        switch self {
+        case .clearBasisRequired:
+            "Clear requires one explicit task-level basis: owner-pause, owner-stop, completed, obsolete, or indefinite-external-wait. A session stop, review handoff, checkpoint, or routine phase transition must leave the Task focused."
+        case .clearBasisForbiddenForFocus:
+            "Focus and Start do not accept a clear basis."
+        case .clearBasisForbiddenForNonTask:
+            "Task-level clear bases do not apply to Idea, Project, or Initiative attention."
+        case let .lifecycleMismatch(basis, lifecycle):
+            "Canvas clear basis \(basis.rawValue) does not match canonical lifecycle \(lifecycle). Completed requires Done / Complete and obsolete requires Done / Obsolete."
+        }
+    }
+}
+
+enum CanvasContinuityPolicy {
+    static func validateShape(
+        desiredState: CanvasDesiredState,
+        clearBasis: CanvasClearBasis?,
+        workID: String
+    ) throws {
+        switch desiredState {
+        case .focused:
+            guard clearBasis == nil else { throw CanvasContinuityPolicyError.clearBasisForbiddenForFocus }
+        case .clear where workID.hasPrefix("\(WorkKind.task.identifierPrefix)-"):
+            guard clearBasis != nil else { throw CanvasContinuityPolicyError.clearBasisRequired }
+        case .clear:
+            guard clearBasis == nil else { throw CanvasContinuityPolicyError.clearBasisForbiddenForNonTask }
+        }
+    }
+
+    static func validate(
+        desiredState: CanvasDesiredState,
+        clearBasis: CanvasClearBasis?,
+        kind: WorkKind,
+        lifecycle: String
+    ) throws {
+        switch desiredState {
+        case .focused:
+            guard clearBasis == nil else { throw CanvasContinuityPolicyError.clearBasisForbiddenForFocus }
+        case .clear where kind == .task:
+            guard let clearBasis else { throw CanvasContinuityPolicyError.clearBasisRequired }
+            if clearBasis == .completed, lifecycle != "Done / Complete" {
+                throw CanvasContinuityPolicyError.lifecycleMismatch(clearBasis, lifecycle)
+            }
+            if clearBasis == .obsolete, lifecycle != "Done / Obsolete" {
+                throw CanvasContinuityPolicyError.lifecycleMismatch(clearBasis, lifecycle)
+            }
+        case .clear:
+            guard clearBasis == nil else { throw CanvasContinuityPolicyError.clearBasisForbiddenForNonTask }
+        }
+    }
+}
+
+enum CanvasContinuityPresentation {
+    static let taskClearExplanation = "Task attention persists across session, review, checkpoint, and routine phase handoffs. Clear requires an explicit owner-level or terminal basis."
+
+    static func requiresTaskClearBasis(action: CanvasWorkAction, kind: WorkKind) -> Bool {
+        action == .stop && kind == .task
+    }
+
+    static func clearBasisOptions(action: CanvasWorkAction, kind: WorkKind) -> [CanvasClearBasis] {
+        requiresTaskClearBasis(action: action, kind: kind) ? CanvasClearBasis.allCases : []
+    }
+}
+
 enum CanvasAttentionDisposition: String, Codable, Equatable {
     case changed
     case alreadyDesired
@@ -24,18 +108,20 @@ struct CanvasAttentionOperationResult: Equatable {
     let operationID: UUID
     let workID: String
     let desiredState: CanvasDesiredState
+    let clearBasis: CanvasClearBasis?
     let disposition: CanvasAttentionDisposition
     let appendedEvents: [String]
 
     var compactDescription: String {
         let operation = "Operation \(operationID.uuidString)."
+        let basis = clearBasis.map { " for \($0.rawValue)" } ?? ""
         return switch (desiredState, disposition) {
         case (.focused, .changed): "Focused \(workID). \(operation)"
         case (.focused, .alreadyDesired): "\(workID) is already focused; no Canvas event was appended. \(operation)"
         case (.focused, .reconciled): "Focused \(workID); the exact committed result was reconciled. \(operation)"
-        case (.clear, .changed): "Cleared \(workID). \(operation)"
-        case (.clear, .alreadyDesired): "\(workID) is already clear; no Canvas event was appended. \(operation)"
-        case (.clear, .reconciled): "Cleared \(workID); the exact committed result was reconciled. \(operation)"
+        case (.clear, .changed): "Cleared \(workID)\(basis). \(operation)"
+        case (.clear, .alreadyDesired): "\(workID) is already clear\(basis); no Canvas event was appended. \(operation)"
+        case (.clear, .reconciled): "Cleared \(workID)\(basis); the exact committed result was reconciled. \(operation)"
         }
     }
 }
@@ -126,8 +212,11 @@ struct CanvasAttentionOperationService {
         work: WorkItem,
         reason: String,
         context: String,
+        clearBasis: CanvasClearBasis? = nil,
         reload: (ProductionsConfiguration) -> ProductionsState
     ) throws -> CanvasAttentionOperationResult {
+        try CanvasContinuityPolicy.validate(desiredState: desiredState, clearBasis: clearBasis, kind: work.kind, lifecycle: work.lifecycle)
+        let transactionContext = clearBasis.map { "\($0.auditContextPrefix) \(context)" } ?? context
         let operationID = makeOperationID()
         let before = try canvas.inspect(configuration: configuration, work: work, state: reload(configuration))
         let attempts = max(1, retryPolicy.maximumAttempts)
@@ -140,13 +229,14 @@ struct CanvasAttentionOperationService {
                     configuration: configuration,
                     work: work,
                     reason: reason,
-                    context: context,
+                    context: transactionContext,
+                    clearBasis: clearBasis,
                     reload: reload
                 ) {
                 case let .changed(result):
-                    return CanvasAttentionOperationResult(operationID: operationID, workID: work.id, desiredState: desiredState, disposition: .changed, appendedEvents: result.appendedEvents)
+                    return CanvasAttentionOperationResult(operationID: operationID, workID: work.id, desiredState: desiredState, clearBasis: clearBasis, disposition: .changed, appendedEvents: result.appendedEvents)
                 case .alreadyDesired:
-                    return CanvasAttentionOperationResult(operationID: operationID, workID: work.id, desiredState: desiredState, disposition: .alreadyDesired, appendedEvents: [])
+                    return CanvasAttentionOperationResult(operationID: operationID, workID: work.id, desiredState: desiredState, clearBasis: clearBasis, disposition: .alreadyDesired, appendedEvents: [])
                 }
             } catch CanvasWorkTransactionError.lockUnavailable where attempt < attempts {
                 if retryPolicy.delay > 0 { sleep(retryPolicy.delay) }
@@ -258,7 +348,7 @@ struct CanvasAttentionOperationService {
                 commitStatus: .committedAndCurrentlySatisfied,
                 diagnostic: "The exact journal-bound Canvas replacement is committed and remains the current requested boundary."
             )
-            return CanvasAttentionOperationResult(operationID: operationID, workID: work.id, desiredState: desiredState, disposition: .reconciled, appendedEvents: [])
+            return CanvasAttentionOperationResult(operationID: operationID, workID: work.id, desiredState: desiredState, clearBasis: journal.clearBasis, disposition: .reconciled, appendedEvents: [])
         case .historicallyCommittedAndSuperseded:
             try finalizeProvenCommit(
                 journal: &journal,

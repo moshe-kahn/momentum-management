@@ -43,7 +43,7 @@ final class CanvasWorkTransactionsTests: XCTestCase {
     func testStopWorkAppendsClearedWithoutChangingRegistry() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         let registryBefore = try fixture.data(at: "Office/Registry/Tasks.md")
-        let result = try service().perform(action: .stop, configuration: config(fixture), work: task(fixture), reason: "Deferral.", context: "Resume after approval.", reload: { _ in fixture.load() })
+        let result = try service().perform(action: .stop, configuration: config(fixture), work: task(fixture), reason: "Deferral.", context: "Resume after approval.", clearBasis: .ownerPause, reload: { _ in fixture.load() })
         XCTAssertEqual(result.appendedEvents, ["Cleared"])
         XCTAssertEqual(try canvasRows(fixture).last?["Event"], "Cleared")
         XCTAssertFalse(fixture.load().canvasCurrentIDs.contains("TASK-000001"))
@@ -54,11 +54,66 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         fixture.replaceCanvas(emptyCanvas)
         let before = try fixture.snapshot(); let journal = MemoryCanvasJournal()
-        XCTAssertThrowsError(try service(journal: journal).perform(action: .stop, configuration: config(fixture), work: task(fixture), reason: "Deferral.", context: "Later.", reload: { _ in fixture.load() })) { error in
+        XCTAssertThrowsError(try service(journal: journal).perform(action: .stop, configuration: config(fixture), work: task(fixture), reason: "Deferral.", context: "Later.", clearBasis: .ownerPause, reload: { _ in fixture.load() })) { error in
             XCTAssertEqual(error as? CanvasWorkTransactionError, .notCurrent)
         }
         XCTAssertEqual(try fixture.snapshot(), before)
         XCTAssertTrue(journal.journals.isEmpty)
+    }
+
+    func testLowLevelStopRequiresOwnerLevelBasisAndCanonicalLifecycleAgreement() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try fixture.snapshot()
+        let journal = MemoryCanvasJournal()
+
+        XCTAssertThrowsError(
+            try service(journal: journal).perform(
+                action: .stop,
+                configuration: config(fixture),
+                work: task(fixture),
+                reason: "Session ended.",
+                context: "Routine handoff.",
+                reload: { _ in fixture.load() }
+            )
+        ) { error in
+            XCTAssertEqual(error as? CanvasContinuityPolicyError, .clearBasisRequired)
+        }
+
+        let canonical = try task(fixture)
+        let forgedDone = WorkItem(
+            id: canonical.id,
+            kind: canonical.kind,
+            title: canonical.title,
+            lifecycle: "Done / Complete",
+            priority: canonical.priority,
+            lead: canonical.lead,
+            department: canonical.department,
+            product: canonical.product,
+            workspacePath: canonical.workspacePath,
+            related: canonical.related,
+            dependencies: canonical.dependencies,
+            registryDescription: canonical.registryDescription,
+            content: canonical.content,
+            workspace: canonical.workspace
+        )
+        XCTAssertThrowsError(
+            try service(journal: journal).perform(
+                action: .stop,
+                configuration: config(fixture),
+                work: forgedDone,
+                reason: "False completion.",
+                context: "Continuity regression.",
+                clearBasis: .completed,
+                reload: { _ in fixture.load() }
+            )
+        ) { error in
+            guard case .conflict = error as? CanvasWorkTransactionError else {
+                return XCTFail("Expected canonical lifecycle conflict, got \(error)")
+            }
+        }
+
+        XCTAssertTrue(journal.journals.isEmpty)
+        XCTAssertEqual(try fixture.snapshot(), before)
     }
 
     @MainActor
@@ -81,6 +136,78 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         XCTAssertTrue(model.state?.canvasCurrentIDs.contains(work.id) == true)
         XCTAssertTrue(model.message?.hasPrefix("Focused TASK-000001. Operation ") == true)
         XCTAssertNil(model.sessionPackage)
+    }
+
+    @MainActor
+    func testViewModelTaskClearRequiresAndPersistsSelectedBasisInJournalAndAuditContext() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let before = try fixture.snapshot()
+        let journal = MemoryCanvasJournal()
+        let model = try makeViewModel(fixture, journal: journal)
+        let work = try XCTUnwrap(model.state?.work.first { $0.id == "TASK-000001" })
+
+        model.performCanvasAction(.stop, work: work, reason: "Session ended.", context: "Routine handoff.")
+        XCTAssertTrue(model.message?.contains("Clear requires one explicit task-level basis") == true)
+        XCTAssertTrue(journal.journals.isEmpty)
+        XCTAssertEqual(try fixture.snapshot(), before)
+
+        model.performCanvasAction(.stop, work: work, reason: "Owner paused.", context: "Resume on owner direction.", clearBasis: .ownerPause)
+        XCTAssertEqual(journal.journals.last?.clearBasis, .ownerPause)
+        XCTAssertEqual(journal.journals.last?.context, "Canvas clear basis: owner-pause. Resume on owner direction.")
+        XCTAssertTrue(model.message?.hasPrefix("Cleared TASK-000001 for owner-pause. Operation ") == true)
+        XCTAssertFalse(model.state?.canvasCurrentIDs.contains(work.id) == true)
+    }
+
+    @MainActor
+    func testViewModelTaskTerminalClearBasesValidateCanonicalLifecycle() throws {
+        for (basis, lifecycle) in [(CanvasClearBasis.completed, "Done / Complete"), (.obsolete, "Done / Obsolete")] {
+            do {
+                let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+                let before = try fixture.snapshot()
+                let journal = MemoryCanvasJournal()
+                let model = try makeViewModel(fixture, journal: journal)
+                let work = try XCTUnwrap(model.state?.work.first { $0.id == "TASK-000001" })
+                model.performCanvasAction(.stop, work: work, reason: "Invalid terminal basis.", context: "Lifecycle is still active.", clearBasis: basis)
+                XCTAssertTrue(model.message?.contains("does not match canonical lifecycle Active / Current") == true)
+                XCTAssertTrue(journal.journals.isEmpty)
+                XCTAssertEqual(try fixture.snapshot(), before)
+            }
+
+            do {
+                let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+                try replaceTaskLifecycle(lifecycle, fixture: fixture)
+                let journal = MemoryCanvasJournal()
+                let model = try makeViewModel(fixture, journal: journal)
+                let work = try XCTUnwrap(model.state?.work.first { $0.id == "TASK-000001" })
+                model.performCanvasAction(.stop, work: work, reason: "Canonical terminal basis.", context: "Lifecycle agrees.", clearBasis: basis)
+                XCTAssertEqual(journal.journals.last?.clearBasis, basis)
+                XCTAssertFalse(model.state?.canvasCurrentIDs.contains(work.id) == true)
+            }
+        }
+    }
+
+    @MainActor
+    func testViewModelIdeaProjectAndInitiativeClearRemainBasisFree() throws {
+        let cases: [(WorkKind, String, String, String)] = [
+            (.idea, "IDEA-000001", "Synthetic idea", "Open"),
+            (.project, "PROJ-000001", "Synthetic project", "Active / Current"),
+            (.initiative, "INIT-000001", "Synthetic initiative", "Done / Complete"),
+        ]
+
+        for (kind, workID, title, lifecycle) in cases {
+            let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+            try installNonTask(kind: kind, workID: workID, title: title, lifecycle: lifecycle, fixture: fixture)
+            let journal = MemoryCanvasJournal()
+            let model = try makeViewModel(fixture, journal: journal)
+            let work = try XCTUnwrap(model.state?.work.first { $0.id == workID })
+
+            model.performCanvasAction(.stop, work: work, reason: "Accepted non-Task clear.", context: "Preserve existing behavior.")
+
+            XCTAssertNil(journal.journals.last?.clearBasis)
+            XCTAssertEqual(journal.journals.last?.context, "Preserve existing behavior.")
+            XCTAssertTrue(model.message?.hasPrefix("Cleared \(workID). Operation ") == true)
+            XCTAssertFalse(model.state?.canvasCurrentIDs.contains(workID) == true)
+        }
     }
 
     func testInvalidFieldsAndUnregisteredTargetsAreRejectedBeforeJournal() throws {
@@ -110,7 +237,7 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         let before = try fixture.snapshot(); let journal = MemoryCanvasJournal()
 
         for action in [CanvasWorkAction.start, .stop] {
-            XCTAssertThrowsError(try service(journal: journal).perform(action: action, configuration: config(fixture), work: task(fixture), reason: "Authorized action.", context: "Test.", reload: { _ in fixture.load() })) { error in
+            XCTAssertThrowsError(try service(journal: journal).perform(action: action, configuration: config(fixture), work: task(fixture), reason: "Authorized action.", context: "Test.", clearBasis: action == .stop ? .ownerStop : nil, reload: { _ in fixture.load() })) { error in
                 guard case .conflict = error as? CanvasWorkTransactionError else { return XCTFail("Expected contract conflict, got \(error)") }
             }
         }
@@ -190,6 +317,7 @@ final class CanvasWorkTransactionsTests: XCTestCase {
         XCTAssertEqual(decoded.transactionID, legacy.transactionID)
         XCTAssertNil(decoded.reason)
         XCTAssertNil(decoded.context)
+        XCTAssertNil(decoded.clearBasis)
         XCTAssertNil(decoded.targetHash)
         XCTAssertNil(decoded.expectedCanvasHash)
         XCTAssertTrue(decoded.terminalState?.isIncomplete == true, "Legacy preCommitFailure journals remain visible because older replacement exceptions were not outcome-safe.")
@@ -245,9 +373,43 @@ final class CanvasWorkTransactionsTests: XCTestCase {
     }
 
     @MainActor
-    private func makeViewModel(_ fixture: SyntheticProductionsFixture) throws -> ProductionsDashboardViewModel {
-        let journal = MemoryCanvasJournal()
+    private func makeViewModel(_ fixture: SyntheticProductionsFixture, journal: MemoryCanvasJournal = MemoryCanvasJournal()) throws -> ProductionsDashboardViewModel {
         return ProductionsDashboardViewModel(reader: LocalFileSystem(), canvasWorkService: service(journal: journal), initialConfiguration: config(fixture))
+    }
+
+    private func replaceTaskLifecycle(_ lifecycle: String, fixture: SyntheticProductionsFixture) throws {
+        let path = ProductionsPath.tasks.rawValue
+        let current = String(decoding: try fixture.data(at: path), as: UTF8.self)
+        try fixture.add(current.replacingOccurrences(of: "Active / Current", with: lifecycle), at: path)
+    }
+
+    private func installNonTask(kind: WorkKind, workID: String, title: String, lifecycle: String, fixture: SyntheticProductionsFixture) throws {
+        let registryPath: String
+        let header: String
+        let row: String
+        switch kind {
+        case .idea:
+            registryPath = ProductionsPath.ideas.rawValue
+            header = "| Idea ID | Title | Disposition | Priority | Current lead | Related records | Source artifacts | Short description | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            row = "| \(workID) | \(title) | \(lifecycle) | Medium | Office | — | — | test | [record](../../Workspace/\(workID)/\(workID).md) |"
+        case .project:
+            registryPath = ProductionsPath.projects.rawValue
+            header = "| Project ID | Title | State | Priority | Current lead | Related records | Depends on | Short description | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            row = "| \(workID) | \(title) | \(lifecycle) | Medium | Office | — | — | test | [record](../../Workspace/\(workID)/\(workID).md) |"
+        case .initiative:
+            registryPath = ProductionsPath.initiatives.rawValue
+            header = "| Initiative ID | Title | State | Priority | Current lead | Related records | Depends on | Short description | Workspace |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            row = "| \(workID) | \(title) | \(lifecycle) | Medium | Office | — | — | test | [record](../../Workspace/\(workID)/\(workID).md) |"
+        case .task:
+            throw NSError(domain: "CanvasWorkTransactionsTests", code: 99)
+        }
+        try fixture.add("\(header)\n\(row)", at: registryPath)
+        try fixture.add(
+            "# \(workID)\n\n## Core Record\n\n```text\nTitle: \(title)\nID: \(workID)\nType: \(kind.rawValue)\nAssociated product(s): —\nPrimary department: Office\n```",
+            at: "Workspace/\(workID)/\(workID).md"
+        )
+        let canvas = "| Occurred | Work ID | Event | Reason | Context |\n| --- | --- | --- | --- | --- |\n| 2026-08-11T12:00:00Z | TASK-000001 | Placed | focus | test |\n| 2026-08-11T12:01:00Z | TASK-000001 | Engaged | work | test |\n| 2026-08-11T12:02:00Z | \(workID) | Placed | focus | test |\n| 2026-08-11T12:03:00Z | \(workID) | Engaged | work | test |"
+        fixture.replaceCanvas(canvas)
     }
 }
 

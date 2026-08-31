@@ -1,6 +1,8 @@
-# Canvas Ordinary-Attention Contract Delta — Adopted Provenance
+# Canvas Attention Contract Delta — Adopted Provenance and Pending Task-Level Continuity
 
-Status: Adopted provenance; not a competing canonical Productions contract.
+Status: The ordinary-attention material below is adopted provenance, not a
+competing canonical Productions contract. The final task-level continuity
+section is a review-only proposal for one coherent later canonical adoption.
 
 This file preserves the repository delta incorporated into Momentum Management
 Filesystem Contract (DOC-0016) version 1.11 and aligned with the independently
@@ -162,3 +164,99 @@ In the Tier 3 description, add:
 > to owner-visible preview choreography. It preserves the same shared
 > transaction service, bounded pre-mutation locking, operation journal,
 > atomicity, canonical reconciliation, and visible uncertainty guarantees.
+
+## Pending task-level continuity correction
+
+The following text is proposed as one coherent adoption package. It must not be
+copied piecemeal into canonical Productions guidance. Until separately adopted
+and independently verified, the current DOC-0016 v1.12 identities remain
+authoritative and live writers remain bound to them.
+
+### DOC-0016 — task-level Canvas continuity
+
+Add:
+
+> Canvas attention represents the owner's active Task pursuit, not the lifetime
+> of one application or agent session. Once focused, an Active / Current Task
+> remains current across implementation, independent review, correction,
+> commit, integration, validation, acceptance, a governed checkpoint, and the
+> next already-authorized routine phase. Ending or idling a session, returning
+> a routine handoff, or moving work between sessions is a session boundary only
+> and never authorizes Clear.
+>
+> Task Clear is allowed only with one exact typed basis: `owner-pause`, `owner-stop`,
+> `completed`, `obsolete`, or `indefinite-external-wait`. `completed` requires
+> the canonical lifecycle `Done / Complete`; `obsolete` requires `Done /
+> Obsolete`. A known review, correction, integration, checkpoint, scheduled
+> wake, or other routine next gate is not an indefinite external wait.
+>
+> Ordinary Task Clear and compatibility Task Stop require the exact clear basis before
+> UUID generation, locking, journal creation, or canonical mutation. The basis
+> is bound into confirmation material where applicable, the durable journal,
+> inspection, compact diagnostics, and the appended event Context. Focus and
+> Start reject a supplied clear basis. Missing, unknown, or session-stop-like
+> bases fail before mutation. Legacy journals without a basis remain readable,
+> but no new Task Clear or Task Stop may omit it. This correction is Task-only:
+> existing Idea, Project, and Initiative Clear/Stop remains basis-free, rejects
+> a supplied Task clear basis, and receives no lifecycle or migration inference.
+> Every callable Task Clear surface, including the ordinary application sheet,
+> requires an accessible exact choice among the same five values before it can
+> invoke the writer. It explains the task-level continuity restriction and
+> passes the selected basis through the shared journal and audit Context.
+> Focus and non-Task Clear expose no basis choice.
+
+### DOC-0005 — session stop versus owner stop
+
+Add:
+
+> A session stop ends only that session. It returns a structured handoff while
+> preserving current Canvas attention for an active owner pursuit. An owner
+> stop is a distinct, explicit administrative decision and uses Clear with the
+> `owner-stop` basis. Routine handoff, reviewer wait, checkpoint wait, or next
+> phase routing does not imply owner stop.
+
+### Root AGENTS.md and Productions role guides
+
+Replace any blanket instruction to Clear when a session stops, completes a
+routine phase, or hands work onward with:
+
+> Preserve Canvas focus while the owner pursuit remains active, including
+> implementation, review, correction, checkpoint, and routine phase handoff.
+> A session terminal handoff does not Clear the Task. Use Clear only for an
+> explicit owner pause or stop, canonical Done / Complete or Done / Obsolete,
+> or a genuine indefinite external wait, and supply the matching typed basis.
+> Never infer one of those bases from session idleness or a routine gate.
+
+The Coordinator routes owner-facing strategy, the Manager advances authorized
+routine gates, and the Office Administrator performs a governed Task Clear
+only with the required authority and exact basis. These role boundaries do not
+change lifecycle, priority, or Canvas independently.
+
+### Current-task migration and reconciliation
+
+Apply read-only-first reconciliation when adopting this correction:
+
+1. If an active owner pursuit is already current, append no event.
+2. If evidence proves that a prior Clear represented only a routine session or
+   phase boundary, never rewrite or backdate Canvas. After owner confirmation,
+   perform one ordinary Focus; the new event is the auditable restoration.
+3. Preserve Clears whose exact evidence establishes one of the five allowed
+   bases.
+4. If the historical basis is ambiguous, surface an owner decision and make no
+   mutation. Never infer renewed work, lifecycle, priority, or completion.
+
+### Command schema
+
+```text
+OperationsDashboard canvas clear ... --work <TASK-ID> --clear-basis <owner-pause|owner-stop|completed|obsolete|indefinite-external-wait>
+OperationsDashboard canvas clear ... --work <IDEA|PROJ|INIT-ID>
+OperationsDashboard canvas preview stop ... --work <TASK-ID> --clear-basis <value>
+OperationsDashboard canvas stop ... --work <TASK-ID> --clear-basis <value> --confirm <token>
+```
+
+The compatibility Start/Stop preview schema is version 2 and has an optional
+`clearBasis` member. JSON omits that member for Start and for basis-free Idea,
+Project, and Initiative Stop; Task Stop includes the exact basis.
+The basis is part of the confirmation token input and immutable journal
+envelope. All existing atomic replacement, proof, inspection, recovery, and
+no-automatic-retry rules remain unchanged.

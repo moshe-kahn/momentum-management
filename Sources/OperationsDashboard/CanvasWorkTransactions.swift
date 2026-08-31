@@ -144,6 +144,7 @@ struct CanvasWorkTransactionJournal: Codable, Equatable {
     let appendedEvents: [String]
     let reason: String?
     let context: String?
+    let clearBasis: CanvasClearBasis?
     let targetHash: String?
     let expectedCanvasHash: String?
     private(set) var terminalState: CanvasWorkTransactionTerminalState?
@@ -277,17 +278,20 @@ struct CanvasWorkTransactionService {
     let replacer: any AtomicFileReplacing
     let locking: any CanvasWorkTransactionLocking
     let now: () -> Date
+    let makeOperationID: () -> UUID
 
     init(
         journalStore: any CanvasWorkTransactionJournalStore = ApplicationSupportCanvasWorkTransactionJournalStore(),
         replacer: (any AtomicFileReplacing)? = nil,
         locking: any CanvasWorkTransactionLocking = LocalCanvasWorkTransactionLocking(),
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        makeOperationID: @escaping () -> UUID = UUID.init
     ) {
         self.journalStore = journalStore
         self.replacer = replacer ?? DurableReplacement()
         self.locking = locking
         self.now = now
+        self.makeOperationID = makeOperationID
     }
 
     func startupRecovery() -> [CanvasWorkTransactionJournal] { (try? journalStore.incomplete()) ?? [] }
@@ -298,17 +302,25 @@ struct CanvasWorkTransactionService {
         work: WorkItem,
         reason: String,
         context: String,
+        clearBasis: CanvasClearBasis? = nil,
         reload: (ProductionsConfiguration) -> ProductionsState
     ) throws -> CanvasWorkTransactionResult {
+        try CanvasContinuityPolicy.validate(
+            desiredState: action == .start ? .focused : .clear,
+            clearBasis: clearBasis,
+            kind: work.kind,
+            lifecycle: work.lifecycle
+        )
         let outcome = try performLocked(
             action: action,
             configuration: configuration,
             work: work,
             reason: reason,
             context: context,
-            operationID: UUID(),
+            operationID: makeOperationID(),
             noOpWhenDesired: false,
             requiresCleanProductions: true,
+            clearBasis: clearBasis,
             reload: reload
         )
         guard case let .changed(result) = outcome else { preconditionFailure("Low-level Canvas actions never return a desired-state no-op.") }
@@ -322,6 +334,7 @@ struct CanvasWorkTransactionService {
         work: WorkItem,
         reason: String,
         context: String,
+        clearBasis: CanvasClearBasis? = nil,
         reload: (ProductionsConfiguration) -> ProductionsState
     ) throws -> CanvasDesiredStateTransactionOutcome {
         try performLocked(
@@ -333,6 +346,7 @@ struct CanvasWorkTransactionService {
             operationID: operationID,
             noOpWhenDesired: true,
             requiresCleanProductions: false,
+            clearBasis: clearBasis,
             reload: reload
         )
     }
@@ -346,6 +360,7 @@ struct CanvasWorkTransactionService {
         operationID: UUID,
         noOpWhenDesired: Bool,
         requiresCleanProductions: Bool,
+        clearBasis: CanvasClearBasis?,
         reload: (ProductionsConfiguration) -> ProductionsState
     ) throws -> CanvasDesiredStateTransactionOutcome {
         try validateField(reason, name: "Reason")
@@ -358,9 +373,18 @@ struct CanvasWorkTransactionService {
         guard !requiresCleanProductions || baselineState.issues.isEmpty else {
             throw CanvasWorkTransactionError.conflict("Productions has contract issues; resolve them before changing Canvas.")
         }
-        guard baselineState.work.contains(where: { $0.id == work.id && $0.kind == work.kind }) else {
+        guard let canonicalWork = baselineState.work.first(where: { $0.id == work.id && $0.kind == work.kind }) else {
             throw CanvasWorkTransactionError.invalidTarget("The selected work is no longer present in the canonical loaded state.")
         }
+        guard canonicalWork.lifecycle == work.lifecycle else {
+            throw CanvasWorkTransactionError.conflict("The selected work lifecycle changed before the Canvas transaction.")
+        }
+        try CanvasContinuityPolicy.validate(
+            desiredState: action == .start ? .focused : .clear,
+            clearBasis: clearBasis,
+            kind: canonicalWork.kind,
+            lifecycle: canonicalWork.lifecycle
+        )
         let targetHash = try validateTarget(work, configuration: configuration)
         let preimage = try Data(contentsOf: canvasURL)
         let canvasHash = hash(preimage)
@@ -380,6 +404,7 @@ struct CanvasWorkTransactionService {
                 appendedEvents: [],
                 reason: reason,
                 context: context,
+                clearBasis: clearBasis,
                 targetHash: targetHash,
                 expectedCanvasHash: canvasHash,
                 terminalState: .alreadyDesired,
@@ -417,6 +442,7 @@ struct CanvasWorkTransactionService {
             appendedEvents: events,
             reason: reason,
             context: context,
+            clearBasis: clearBasis,
             targetHash: targetHash,
             expectedCanvasHash: hash(Data(replacement.utf8)),
             terminalState: nil,

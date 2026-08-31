@@ -6,6 +6,13 @@ Operations Dashboard is a reusable operating-view capability owned by Momentum M
 
 The dashboard viewing layer supports exactly two explicitly configured products. It counts visible immediate Inbox entries and parses only the documented `# Status` Markdown schema. The overview compares product name, Inbox count, current Status, and warnings. Selecting a product in the same window shows its complete operating detail: declared Last updated, Next actions, Blockers, source-role availability, and status-record filesystem modification time. Declared Last updated and file modification time are visibly distinct and neither is used to infer priority or freshness. Selection is in memory only. This viewing layer is read-only and can ask macOS to open only an existing configured product root, Inbox, or status record; it never discovers products or sends network requests. The separate Add Items capture UI can create notes and move configured intake items into its authorized Inbox through the capture service. Separately, recognized headless commands can dispatch canonical mutations through their specific services. The owner-authorized Task checkpoint and accepted-handoff writers are callable only after independently verified DOC-0016 v1.12 adoption; their complete inputs and preimage hashes are the authorization boundary. The Office reconciliation surface previews and atomically repairs only recognized lifecycle/priority mirrors. Task checkpoint and accepted-handoff writers compose the same validation and Registry-authoritative repair into their bound Workspace replacement when they encounter a recognized stale mirror. Every automatic repair stays in its originating durable journal as a pending review item exposed beside Inbox. Advisory handoff review and reconciliation acknowledgement never start or focus work. A separate local Manager-routing ledger gives every inter-task route a stable operation UUID, acknowledgement/running/terminal history, monitored wait or wake, exactly one structured terminal handoff, atomic already-authorized gate advancement, and a compact Waiting for Manager/target/owner status. It never grants Productions mutation authority.
 
+Canvas attention is task-level rather than session-level. An active owner
+pursuit stays current through implementation, review, correction, checkpoint,
+and routine phase handoffs. Task Clear and compatibility Stop require an exact
+owner-level basis; a session ending or becoming idle is never one. Existing
+Idea, Project, and Initiative attention remains basis-free. The in-app Task
+Clear sheet requires the same accessible exact basis choice as the CLI.
+
 ## Build and test
 
 Open `Package.swift` in Xcode when full Xcode is available, or use the Swift command-line toolchain:

@@ -311,7 +311,8 @@ The repository implements a compact one-action ordinary-attention surface:
 
 ```text
 OperationsDashboard canvas focus --productions-root <path> --work <ID> --reason <text> --context <text>
-OperationsDashboard canvas clear --productions-root <path> --work <ID> --reason <text> --context <text>
+OperationsDashboard canvas clear --productions-root <path> --work <TASK-ID> --clear-basis <owner-pause|owner-stop|completed|obsolete|indefinite-external-wait> --reason <text> --context <text>
+OperationsDashboard canvas clear --productions-root <path> --work <IDEA|PROJ|INIT-ID> --reason <text> --context <text>
 OperationsDashboard canvas inspect --productions-root <path> --operation <UUID>
 ```
 
@@ -331,6 +332,32 @@ sentence containing the discoverable operation ID; `canvas inspect` exposes
 hashes, intended events, terminal state, historical evidence, current-boundary
 proof, and reconciliation diagnostics without mutating Productions.
 
+Canvas attention is task-level: an active owner pursuit remains current across
+implementation, review, correction, checkpoint, integration, acceptance, and a
+routine next phase. Session idleness or a routine terminal handoff is not a
+Clear basis. Task Clear requires one exact owner-level basis before UUID, lock,
+journal, or write. `completed` requires `Done / Complete`; `obsolete` requires
+`Done / Obsolete`. Focus rejects a supplied basis. The basis is recorded in the
+journal, inspection result, compact output, and event Context. Legacy journals
+remain readable, but new Task Clear operations cannot omit the basis.
+
+This continuity correction is deliberately Task-only. Existing Idea, Project,
+and Initiative attention keeps its accepted basis-free Clear behavior and
+rejects a supplied Task clear basis. It receives no task-lifecycle inference or
+migration.
+
+The in-app Task Clear sheet exposes the same five exact basis values as a
+required accessible picker, explains that Task attention survives routine
+session and phase handoffs, and keeps Clear disabled until a basis is selected.
+The selected basis reaches the same service, journal, and audit Context as the
+headless surface. Focus and non-Task Clear show no basis picker.
+
+At canonical adoption, current Tasks are reconciled read-only first. A Task
+already current receives no event. A proven routine-boundary Clear is never
+rewritten or backdated; after owner confirmation, one ordinary Focus restores
+attention. A legitimate owner/terminal/indefinite-wait Clear is preserved, and
+ambiguous evidence is an owner decision with no mutation.
+
 This surface remains adopted for live ordinary Productions attention by Momentum
 Management Filesystem Contract (DOC-0016) version 1.12. The independently
 accepted root `AGENTS.md` correction likewise directs routine task-execution
@@ -343,20 +370,27 @@ compatibility workflows.
 Preview either action:
 
 ```text
-OperationsDashboard canvas preview <start|stop> --productions-root <path> --work <ID> --reason <text> --context <text>
+OperationsDashboard canvas preview start --productions-root <path> --work <ID> --reason <text> --context <text>
+OperationsDashboard canvas preview stop --productions-root <path> --work <TASK-ID> --clear-basis <owner-pause|owner-stop|completed|obsolete|indefinite-external-wait> --reason <text> --context <text>
+OperationsDashboard canvas preview stop --productions-root <path> --work <IDEA|PROJ|INIT-ID> --reason <text> --context <text>
 ```
 
 Execute the reviewed action:
 
 ```text
-OperationsDashboard canvas <start|stop> --productions-root <path> --work <ID> --reason <text> --context <text> --confirm <preview-token>
+OperationsDashboard canvas start --productions-root <path> --work <ID> --reason <text> --context <text> --confirm <preview-token>
+OperationsDashboard canvas stop --productions-root <path> --work <TASK-ID> --clear-basis <owner-pause|owner-stop|completed|obsolete|indefinite-external-wait> --reason <text> --context <text> --confirm <preview-token>
+OperationsDashboard canvas stop --productions-root <path> --work <IDEA|PROJ|INIT-ID> --reason <text> --context <text> --confirm <preview-token>
 ```
 
 `start` prints the prepared session package as canonical JSON. `stop` prints the committed Canvas events. If a Canvas mutation commits but canonical reload or verification fails, or if Canvas start commits but later session-package preparation fails, the command returns exit 3: Canvas has changed and the action must not be retried automatically.
 
-These commands retain their original confirmation-bound behavior for
-compatibility and explicitly sensitive or manual workflows. Ordinary focus and
-clear do not replace or reinterpret their preview tokens.
+These commands retain their confirmation-bound behavior for compatibility and
+explicitly sensitive or manual workflows. Stop binds the same typed owner-level
+Clear basis into a Task preview token and journal; Start rejects that option.
+The optional `clearBasis` JSON member is omitted for Start and for basis-free
+Idea, Project, and Initiative Stop previews; it is present for Task Stop.
+Ordinary focus and clear do not replace or reinterpret preview tokens.
 
 ## Memento
 

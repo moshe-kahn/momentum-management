@@ -3,6 +3,20 @@ import XCTest
 @testable import OperationsDashboard
 
 final class ProductionsDashboardPresentationTests: XCTestCase {
+    func testTaskClearPresentationOffersExactAccessibleBasesWithoutBroadeningOtherKinds() {
+        XCTAssertEqual(
+            CanvasContinuityPresentation.clearBasisOptions(action: .stop, kind: .task).map(\.rawValue),
+            ["owner-pause", "owner-stop", "completed", "obsolete", "indefinite-external-wait"]
+        )
+        XCTAssertTrue(CanvasContinuityPresentation.requiresTaskClearBasis(action: .stop, kind: .task))
+        XCTAssertTrue(CanvasContinuityPresentation.taskClearExplanation.contains("persists across session, review, checkpoint, and routine phase handoffs"))
+        XCTAssertTrue(CanvasContinuityPresentation.clearBasisOptions(action: .start, kind: .task).isEmpty)
+        for kind in [WorkKind.idea, .project, .initiative] {
+            XCTAssertFalse(CanvasContinuityPresentation.requiresTaskClearBasis(action: .stop, kind: kind))
+            XCTAssertTrue(CanvasContinuityPresentation.clearBasisOptions(action: .stop, kind: kind).isEmpty)
+        }
+    }
+
     func testNavigationSectionsUseReviewedIntakeFocusAndBrowseModes() {
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .reconciliations, .managerRouting, .processing])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .focus), [.canvas, .crumbs, .mementos, .priorityWork])

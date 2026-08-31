@@ -8,6 +8,20 @@ Terminal completion and publication of an embedded already-authorized next route
 
 Tests use fixture directories, in-memory configuration storage, and injected filesystem failures to avoid the real user filesystem. No layer receives a real Kahntra path during development or validation.
 
+`CanvasContinuityPolicy` separates task-level owner pursuit from session
+lifetime. Focus preserves attention across routine implementation, review,
+checkpoint, and phase transitions. Task Clear and compatibility Stop require
+one typed owner-level basis before UUID generation or storage access; terminal
+bases are checked against the canonical Registry lifecycle again under the
+writer lock. The basis is immutable journal and audit context. Legacy journals
+remain inspectable, while session-stop-like or missing Task bases cannot mutate
+Canvas. Idea, Project, and Initiative Clear/Stop remains basis-free and rejects
+a Task basis, so this correction does not broaden their lifecycle semantics.
+`CanvasWorkActionSheet` uses the same policy presentation to require one of the
+five exact Task bases, explains the task-level boundary accessibly, and passes
+the selected value through `ProductionsDashboardViewModel` to the shared
+transaction service and journal. Focus and non-Task Clear remain basis-free.
+
 `LifecyclePriorityService` owns the hash-bound Registry/Workspace consistency
 boundary for durable work. It recognizes only exact legacy Core mirrors and the
 exact Lifecycle-and-Attention sentence, treats Registry lifecycle as authority,

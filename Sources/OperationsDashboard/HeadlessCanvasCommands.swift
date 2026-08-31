@@ -22,15 +22,16 @@ struct HeadlessCanvasCommand: Equatable {
     let workID: String
     let reason: String
     let context: String
+    let clearBasis: CanvasClearBasis?
     let confirmation: ConfirmedCommand?
 
-    init(action: CanvasWorkAction, workID: String, reason: String, context: String, confirmation: ConfirmedCommand? = nil) {
-        self.action = action; self.workID = workID; self.reason = reason; self.context = context; self.confirmation = confirmation
+    init(action: CanvasWorkAction, workID: String, reason: String, context: String, clearBasis: CanvasClearBasis? = nil, confirmation: ConfirmedCommand? = nil) {
+        self.action = action; self.workID = workID; self.reason = reason; self.context = context; self.clearBasis = clearBasis; self.confirmation = confirmation
     }
 }
 
 struct CanvasCommandPreview: Codable, Equatable {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
     let schemaVersion: Int
     let productionsRoot: String
     let action: CanvasWorkAction
@@ -38,7 +39,20 @@ struct CanvasCommandPreview: Codable, Equatable {
     let targetTitle: String
     let reason: String
     let context: String
+    let clearBasis: CanvasClearBasis?
     let canvasSHA256: String
+
+    init(schemaVersion: Int, productionsRoot: String, action: CanvasWorkAction, targetID: String, targetTitle: String, reason: String, context: String, clearBasis: CanvasClearBasis? = nil, canvasSHA256: String) {
+        self.schemaVersion = schemaVersion
+        self.productionsRoot = productionsRoot
+        self.action = action
+        self.targetID = targetID
+        self.targetTitle = targetTitle
+        self.reason = reason
+        self.context = context
+        self.clearBasis = clearBasis
+        self.canvasSHA256 = canvasSHA256
+    }
 
     func canonicalData() throws -> Data {
         let encoder = JSONEncoder()
@@ -71,12 +85,22 @@ struct HeadlessCanvasAttentionCommand: Equatable {
     let workID: String
     let reason: String
     let context: String
+    let clearBasis: CanvasClearBasis?
+
+    init(desiredState: CanvasDesiredState, workID: String, reason: String, context: String, clearBasis: CanvasClearBasis? = nil) {
+        self.desiredState = desiredState
+        self.workID = workID
+        self.reason = reason
+        self.context = context
+        self.clearBasis = clearBasis
+    }
 }
 
 struct CanvasAttentionOperationDiagnostic: Codable, Equatable {
     let operationID: UUID
     let workID: String
     let desiredState: CanvasDesiredState
+    let clearBasis: CanvasClearBasis?
     let terminalState: CanvasWorkTransactionTerminalState?
     let canvasPreimageSHA256: String
     let expectedCanvasSHA256: String?
@@ -97,6 +121,11 @@ struct HeadlessCanvasAttentionCommandAdapter {
     }
 
     func execute(_ command: HeadlessCanvasAttentionCommand, configuration: ProductionsConfiguration) throws -> CanvasAttentionOperationResult {
+        try CanvasContinuityPolicy.validateShape(
+            desiredState: command.desiredState,
+            clearBasis: command.clearBasis,
+            workID: command.workID
+        )
         let loader = ProductionsLoader(reader: reader)
         let state = loader.load(configuration: configuration)
         guard let work = state.work.first(where: { $0.id == command.workID }), work.workspace != nil else {
@@ -105,7 +134,7 @@ struct HeadlessCanvasAttentionCommandAdapter {
         guard command.desiredState != .focused || !work.lifecycle.hasPrefix("Done") else {
             throw HeadlessCanvasCommandError.startUnavailable("Focus is unavailable for completed work: \(work.id).")
         }
-        return try attention.perform(desiredState: command.desiredState, configuration: configuration, work: work, reason: command.reason, context: command.context, reload: loader.load)
+        return try attention.perform(desiredState: command.desiredState, configuration: configuration, work: work, reason: command.reason, context: command.context, clearBasis: command.clearBasis, reload: loader.load)
     }
 
     func inspect(operationID: UUID, configuration: ProductionsConfiguration) throws -> CanvasAttentionOperationDiagnostic {
@@ -150,6 +179,7 @@ struct HeadlessCanvasAttentionCommandAdapter {
             operationID: journal.transactionID,
             workID: journal.workID,
             desiredState: desiredState,
+            clearBasis: journal.clearBasis,
             terminalState: journal.terminalState,
             canvasPreimageSHA256: journal.canvasHash,
             expectedCanvasSHA256: journal.expectedCanvasHash,
@@ -179,16 +209,24 @@ struct HeadlessCanvasCommandAdapter {
     }
 
     func preview(for command: HeadlessCanvasCommand, configuration: ProductionsConfiguration) throws -> CanvasCommandPreview {
+        try validateShape(command)
         let state = ProductionsLoader(reader: reader).load(configuration: configuration)
         guard state.issues.isEmpty else { throw HeadlessCanvasCommandError.targetUnavailable("Productions has contract issues; resolve them before changing Canvas.") }
         guard let work = state.work.first(where: { $0.id == command.workID }) else { throw HeadlessCanvasCommandError.targetUnavailable("The requested Registry-backed work item is unavailable: \(command.workID).") }
         guard command.action != .start || !work.lifecycle.hasPrefix("Done") else { throw HeadlessCanvasCommandError.startUnavailable("Start work is unavailable for completed work: \(work.id).") }
+        try CanvasContinuityPolicy.validate(
+            desiredState: command.action == .start ? .focused : .clear,
+            clearBasis: command.clearBasis,
+            kind: work.kind,
+            lifecycle: work.lifecycle
+        )
         let canvasData = try Data(contentsOf: configuration.url(ProductionsPath.canvas.rawValue))
         let canvasHash = SHA256.hash(data: canvasData).map { String(format: "%02x", $0) }.joined()
-        return CanvasCommandPreview(schemaVersion: CanvasCommandPreview.schemaVersion, productionsRoot: configuration.rootURL.standardizedFileURL.path, action: command.action, targetID: work.id, targetTitle: work.title, reason: command.reason, context: command.context, canvasSHA256: canvasHash)
+        return CanvasCommandPreview(schemaVersion: CanvasCommandPreview.schemaVersion, productionsRoot: configuration.rootURL.standardizedFileURL.path, action: command.action, targetID: work.id, targetTitle: work.title, reason: command.reason, context: command.context, clearBasis: command.clearBasis, canvasSHA256: canvasHash)
     }
 
     func execute(_ command: HeadlessCanvasCommand, configuration: ProductionsConfiguration) throws -> HeadlessCanvasCommandOutcome {
+        try validateShape(command)
         let preview = try preview(for: command, configuration: configuration)
         guard let confirmation = command.confirmation else { throw HeadlessCanvasCommandError.confirmationRequired("Run canvas preview and supply its confirmation token with --confirm.") }
         try confirmation.require(preview: preview)
@@ -196,7 +234,8 @@ struct HeadlessCanvasCommandAdapter {
         guard let work = loader.load(configuration: configuration).work.first(where: { $0.id == command.workID }) else { throw HeadlessCanvasCommandError.targetUnavailable("The requested Registry-backed work item is unavailable: \(command.workID).") }
         switch command.action {
         case .stop:
-            return .stopped(try canvas.perform(action: .stop, configuration: configuration, work: work, reason: command.reason, context: command.context, reload: loader.load))
+            let context = command.clearBasis.map { "\($0.auditContextPrefix) \(command.context)" } ?? command.context
+            return .stopped(try canvas.perform(action: .stop, configuration: configuration, work: work, reason: command.reason, context: context, clearBasis: command.clearBasis, reload: loader.load))
         case .start:
             let outcome = try SessionPreparationCoordinator(canvas: canvas, renderer: renderer, reader: reader).startWorkAndPrepare(configuration: configuration, work: work, reason: command.reason, context: command.context, authorization: authorization, recommendedModel: recommendedModel, reasoningLevel: reasoningLevel)
             switch outcome {
@@ -205,13 +244,21 @@ struct HeadlessCanvasCommandAdapter {
             }
         }
     }
+
+    private func validateShape(_ command: HeadlessCanvasCommand) throws {
+        try CanvasContinuityPolicy.validateShape(
+            desiredState: command.action == .start ? .focused : .clear,
+            clearBasis: command.clearBasis,
+            workID: command.workID
+        )
+    }
 }
 
 enum HeadlessCanvasInvocation: Equatable { case preview(HeadlessCanvasCommand, ProductionsConfiguration), execute(HeadlessCanvasCommand, ProductionsConfiguration) }
 
 enum HeadlessCanvasCommandLine {
     static let partialSuccessExitCode: Int32 = 3
-    static let usage = "Usage: OperationsDashboard canvas <focus|clear> --productions-root <path> --work <ID> --reason <text> --context <text>\n       OperationsDashboard canvas inspect --productions-root <path> --operation <UUID>\n       OperationsDashboard canvas preview <start|stop> --productions-root <path> --work <ID> --reason <text> --context <text>\n       OperationsDashboard canvas <start|stop> --productions-root <path> --work <ID> --reason <text> --context <text> --confirm <preview token>"
+    static let usage = "Usage: OperationsDashboard canvas focus --productions-root <path> --work <ID> --reason <text> --context <text>\n       OperationsDashboard canvas clear --productions-root <path> --work <TASK-ID> --clear-basis <owner-pause|owner-stop|completed|obsolete|indefinite-external-wait> --reason <text> --context <text>\n       OperationsDashboard canvas clear --productions-root <path> --work <IDEA|PROJ|INIT-ID> --reason <text> --context <text>\n       OperationsDashboard canvas inspect --productions-root <path> --operation <UUID>\n       OperationsDashboard canvas preview start --productions-root <path> --work <ID> --reason <text> --context <text>\n       OperationsDashboard canvas start --productions-root <path> --work <ID> --reason <text> --context <text> --confirm <preview token>\n       OperationsDashboard canvas preview stop --productions-root <path> --work <TASK-ID> --clear-basis <value> --reason <text> --context <text>\n       OperationsDashboard canvas stop --productions-root <path> --work <TASK-ID> --clear-basis <value> --reason <text> --context <text> --confirm <preview token>\n       OperationsDashboard canvas preview stop --productions-root <path> --work <IDEA|PROJ|INIT-ID> --reason <text> --context <text>\n       OperationsDashboard canvas stop --productions-root <path> --work <IDEA|PROJ|INIT-ID> --reason <text> --context <text> --confirm <preview token>"
 
     static func runIfRequested(
         arguments: [String] = CommandLine.arguments,
@@ -291,14 +338,17 @@ enum HeadlessCanvasCommandLine {
         case "clear": desiredState = .clear
         default: throw HeadlessCanvasCommandError.usage(usage)
         }
-        let options = try parseOptions(Array(arguments.dropFirst(2)), permitsConfirmation: false)
+        let options = try parseOptions(Array(arguments.dropFirst(2)), permitsConfirmation: false, permitsClearBasis: true)
         guard let root = options["--productions-root"], !root.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let workID = options["--work"], !workID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let reason = options["--reason"], let context = options["--context"] else {
             throw HeadlessCanvasCommandError.usage(usage)
         }
+        let clearBasis = try parseClearBasis(options["--clear-basis"])
+        do { try CanvasContinuityPolicy.validateShape(desiredState: desiredState, clearBasis: clearBasis, workID: workID) }
+        catch { throw HeadlessCanvasCommandError.usage(usage) }
         return (
-            HeadlessCanvasAttentionCommand(desiredState: desiredState, workID: workID, reason: reason, context: context),
+            HeadlessCanvasAttentionCommand(desiredState: desiredState, workID: workID, reason: reason, context: context, clearBasis: clearBasis),
             ProductionsConfiguration(schemaVersion: 2, productionsRootPath: root)
         )
     }
@@ -319,19 +369,36 @@ enum HeadlessCanvasCommandLine {
         let isPreview = arguments.dropFirst().first == "preview"
         let actionIndex = isPreview ? 2 : 1
         guard arguments.count > actionIndex, let action = CanvasWorkAction(rawValue: arguments[actionIndex]) else { throw HeadlessCanvasCommandError.usage(usage) }
-        let options = try parseOptions(Array(arguments.dropFirst(actionIndex + 1)), permitsConfirmation: !isPreview)
+        let options = try parseOptions(Array(arguments.dropFirst(actionIndex + 1)), permitsConfirmation: !isPreview, permitsClearBasis: true)
         guard let root = options["--productions-root"], !root.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let workID = options["--work"], !workID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let reason = options["--reason"], let context = options["--context"] else { throw HeadlessCanvasCommandError.usage(usage) }
-        let command = HeadlessCanvasCommand(action: action, workID: workID, reason: reason, context: context, confirmation: options["--confirm"].map(ConfirmedCommand.init))
+        let clearBasis = try parseClearBasis(options["--clear-basis"])
+        do {
+            try CanvasContinuityPolicy.validateShape(
+                desiredState: action == .start ? .focused : .clear,
+                clearBasis: clearBasis,
+                workID: workID
+            )
+        } catch { throw HeadlessCanvasCommandError.usage(usage) }
+        let command = HeadlessCanvasCommand(action: action, workID: workID, reason: reason, context: context, clearBasis: clearBasis, confirmation: options["--confirm"].map(ConfirmedCommand.init))
         let configuration = ProductionsConfiguration(schemaVersion: 2, productionsRootPath: root)
         if isPreview { return .preview(command, configuration) }
         guard command.confirmation != nil else { throw HeadlessCanvasCommandError.usage(usage) }
         return .execute(command, configuration)
     }
 
-    private static func parseOptions(_ arguments: [String], permitsConfirmation: Bool) throws -> [String: String] {
+    private static func parseClearBasis(_ rawValue: String?) throws -> CanvasClearBasis? {
+        guard let rawValue else { return nil }
+        guard let basis = CanvasClearBasis(rawValue: rawValue) else {
+            throw HeadlessCanvasCommandError.usage(usage)
+        }
+        return basis
+    }
+
+    private static func parseOptions(_ arguments: [String], permitsConfirmation: Bool, permitsClearBasis: Bool) throws -> [String: String] {
         var options: [String: String] = [:]
         var index = 0
-        let allowed = permitsConfirmation ? ["--productions-root", "--work", "--reason", "--context", "--confirm"] : ["--productions-root", "--work", "--reason", "--context"]
+        var allowed = permitsConfirmation ? ["--productions-root", "--work", "--reason", "--context", "--confirm"] : ["--productions-root", "--work", "--reason", "--context"]
+        if permitsClearBasis { allowed.append("--clear-basis") }
         while index < arguments.count {
             let name = arguments[index]
             guard allowed.contains(name), index + 1 < arguments.count, options[name] == nil else { throw HeadlessCanvasCommandError.usage(usage) }
