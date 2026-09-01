@@ -117,7 +117,7 @@ final class ProductionsReadOnlyTests: XCTestCase {
         let fixture = try SyntheticProductionsFixture()
         defer { fixture.remove() }
         let before = try fixture.snapshot()
-        let state = ProductionsLoader(reader: LocalFileSystem()).load(configuration: ProductionsConfiguration(schemaVersion: 2, productionsRootPath: fixture.root.path))
+        let state = fixture.load()
         XCTAssertTrue(state.issues.isEmpty, state.issues.map(\.message).joined(separator: "\n"))
         XCTAssertEqual(state.inbox.compactMap(\.flowID), ["FLOW-000001"])
         XCTAssertEqual(state.processing.compactMap(\.flowID), ["BND-000001"])
@@ -407,7 +407,12 @@ final class SyntheticProductionsFixture {
     }
     func remove() { try? manager.removeItem(at: root); additionalURLs.forEach { try? manager.removeItem(at: $0) } }
     var configuration: ProductionsConfiguration { ProductionsConfiguration(schemaVersion: 2, productionsRootPath: root.path) }
-    func load() -> ProductionsState { ProductionsLoader(reader: LocalFileSystem()).load(configuration: configuration) }
+    func load() -> ProductionsState {
+        ProductionsLoader(
+            reader: LocalFileSystem(), reconciliationResolver: ReadOnlyQueueResolver(entries: []),
+            managerRoutingReader: ReadOnlyManagerRoutingReader(items: [])
+        ).load(configuration: configuration)
+    }
     func add(_ text: String, at path: String) throws { try write(text, path) }
     func addOutsideRoot(_ text: String, named name: String) throws { let url = root.deletingLastPathComponent().appending(path: name); try Data(text.utf8).write(to: url); additionalURLs.append(url) }
     func addMementoSymlink(at path: String) throws {

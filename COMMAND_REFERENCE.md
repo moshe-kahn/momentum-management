@@ -240,12 +240,26 @@ parents and reservations cannot claim any existing route or reservation ID.
 Reload rejects every collision except the intentional child-route overlap after
 that reservation's exact parent has forwarded the exact bound child.
 
+A standing continuation is one base64-encoded JSON envelope using schema 1. It
+contains a stable envelope UUID, exact Task/Manager/Architect thread IDs,
+bounded scope, created time, initial stage, complete typed stage graph, the
+complete genuine-owner-gate set, and an initial canonical-context binding. The
+binding contains the exact Productions-root spelling plus current Task Registry,
+Workspace, Canvas, and governing-instruction SHA-256 values, Registry lifecycle
+and priority, and `canvasCurrent: true`. It cannot be combined with the legacy
+single embedded next route. Every destination terminal supplies exactly one
+continuation disposition: `advance`, `in-scope-correction`, `owner-decision`,
+or `safe-stop`.
+
 ```text
+OperationsDashboard manager routing context \
+  --productions-root <path> --task <TASK-ID>
 OperationsDashboard manager route create \
   --task <TASK-ID> --manager-thread <thread-id> --target-thread <thread-id> \
   --action <text> --authority <text> --timeout-at <ISO-8601> \
   [--next-target-thread <thread-id> --next-action <text> \
-   --next-authority <text> --next-timeout-at <ISO-8601>]
+   --next-authority <text> --next-timeout-at <ISO-8601>] \
+  [--standing-continuation-base64 <base64-json>]
 
 OperationsDashboard manager route acknowledge \
   --operation <UUID> --target-thread <thread-id>
@@ -255,8 +269,16 @@ OperationsDashboard manager route terminal \
   --operation <UUID> --target-thread <thread-id> \
   --classification <completed|blocked|uncertain> --summary <text> \
   --evidence <text> [--evidence <text> ...] --next-gate <text> \
-  --unperformed <text> [--unperformed <text> ...]
+  --unperformed <text> [--unperformed <text> ...] \
+  [--continuation-disposition <advance|in-scope-correction|owner-decision|safe-stop>] \
+  [--owner-gate <material-scope-or-product-choice|credentials-or-private-data|external-or-public-mutation|destructive-action|deployment-or-promotion|requested-visual-review|uncertain-or-possible-commit>] \
+  [--resulting-context-base64 <base64-json>]
 ```
+
+`manager routing context` is read-only. It validates adopted v1.12, exact Task
+Registry/Workspace identity, Canvas integrity/currentness, and governing role
+files, then emits the complete hash binding used in an envelope. It creates no
+UUID, ledger, journal, or canonical mutation.
 
 The destination acknowledges the supplied operation UUID and returns exactly
 one structured terminal handoff. An identical duplicate is idempotent and does
@@ -266,6 +288,12 @@ embedded already-authorized next route and mark the source forwarded. If that
 child deadline is already reached, the valid parent receipt remains committed,
 no child is created, and the parent becomes an explicit Manager/owner decision.
 Blocked or uncertain terminal handoffs become the same explicit decision gate.
+Standing routes reread canonical context before advancing. Drift,
+unavailability, a cleared Task, or a genuine owner gate preserves the receipt,
+publishes no child, and returns no-retry `owner-decision-required` for the
+envelope's Architect recipient. Only a canonical-checkpoint stage may bind a
+changed Workspace hash, and its complete resulting context must match the live
+postimage while every non-Workspace binding stays exact.
 No state changes Productions lifecycle, priority, Canvas, or Office records.
 
 ```text
@@ -274,7 +302,7 @@ OperationsDashboard manager routing inspect --operation <UUID>
 OperationsDashboard manager routing idle-check
 OperationsDashboard manager routing reconcile preview \
   --operation <UUID> \
-  --observation <silent-completion|empty-final-output|target-interrupted|timeout>
+  --observation <silent-completion|empty-final-output|target-interrupted|destination-unloaded|expired-task-context|missing-receipt|timeout>
 OperationsDashboard manager routing reconcile apply \
   --operation <UUID> --observation <value> \
   --expected-ledger-sha256 <64-lowercase-hex> --confirm <preview-token>
@@ -291,6 +319,11 @@ token; timeout preview and apply both reject a time before the exact route
 deadline. Monitor wakes equal the bound timeout (or exact terminal transition),
 and acknowledgement/running timestamps equal their durable transitions.
 Blocker or uncertainty never authorizes an automatic retry.
+
+The Dashboard's **Architect Approvals** section consolidates pending
+reconciliation acknowledgements with routing entries genuinely **Waiting for
+owner**. Typed operation IDs are its deduplication keys; the view creates no
+Flow row and does not copy or process Inbox payloads or Quick Notes.
 
 The first durable route also publishes a sibling initialization marker. After
 that point, a missing or unavailable ledger directory/file is storage-uncertain

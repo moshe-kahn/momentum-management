@@ -208,7 +208,26 @@ struct ManagerRoutingQueueItem: Identifiable, Equatable {
     let ageSeconds: Int
     let unresolvedAgeSeconds: Int
     let overdue: Bool
+    let action: String
+    let authorityReference: String
+    let continuationStageID: String?
+    let decisionRecipientThreadID: String?
     var id: UUID { operationID }
+
+    init(
+        operationID: UUID, taskID: String, targetThreadID: String, state: ManagerRouteState,
+        waitingFor: ManagerRouteWaitingFor, ageSeconds: Int, unresolvedAgeSeconds: Int,
+        overdue: Bool, action: String = "Route action unavailable.",
+        authorityReference: String = "Authority unavailable.", continuationStageID: String? = nil,
+        decisionRecipientThreadID: String? = nil
+    ) {
+        self.operationID = operationID; self.taskID = taskID; self.targetThreadID = targetThreadID
+        self.state = state; self.waitingFor = waitingFor; self.ageSeconds = ageSeconds
+        self.unresolvedAgeSeconds = unresolvedAgeSeconds; self.overdue = overdue
+        self.action = action; self.authorityReference = authorityReference
+        self.continuationStageID = continuationStageID
+        self.decisionRecipientThreadID = decisionRecipientThreadID
+    }
 }
 struct ProductionsState: Equatable {
     let configuration: ProductionsConfiguration
@@ -242,7 +261,9 @@ struct ProductionsLoader {
 
     init(
         reader: any ProductionsReading,
-        reconciliationResolver: any ReconciliationQueueResolving = ApplicationSupportReconciliationQueueResolver(),
+        reconciliationResolver: any ReconciliationQueueResolving = ApplicationSupportReconciliationQueueResolver(
+            foreignRootPolicy: .ignoreValidExactRootForReadOnlyStatus
+        ),
         managerRoutingReader: any ManagerRoutingStatusReading = ManagerRoutingService()
     ) {
         self.reader = reader
@@ -292,7 +313,10 @@ struct ProductionsLoader {
                 ManagerRoutingQueueItem(
                     operationID: $0.operationUUID, taskID: $0.taskID, targetThreadID: $0.targetThreadID,
                     state: $0.state, waitingFor: $0.waitingFor, ageSeconds: $0.ageSeconds,
-                    unresolvedAgeSeconds: $0.unresolvedAgeSeconds, overdue: $0.overdue
+                    unresolvedAgeSeconds: $0.unresolvedAgeSeconds, overdue: $0.overdue,
+                    action: $0.action, authorityReference: $0.authorityReference,
+                    continuationStageID: $0.continuationStageID,
+                    decisionRecipientThreadID: $0.decisionRecipientThreadID
                 )
             }
         } catch {

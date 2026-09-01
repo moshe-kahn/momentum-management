@@ -1077,7 +1077,7 @@ final class TaskCheckpointTransactionsTests: XCTestCase {
         XCTAssertEqual(result.outcome, "committed")
         XCTAssertTrue(String(decoding: try fixture.read(fixture.workspaceURL), as: UTF8.self).contains("Priority: Medium"))
         let durable = try XCTUnwrap(checkpointStore.journal(operationID: operationID))
-        XCTAssertEqual(durable.lifecyclePriorityRepairs?.map(\.field), ["priority"])
+        XCTAssertEqual(durable.lifecyclePriorityRepairs?.map(\.field), ["relationship:Project", "priority"])
         XCTAssertEqual(durable.reconciliationQueueDisposition, .pending)
 
         let queue = LifecyclePriorityService(

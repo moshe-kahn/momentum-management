@@ -42,11 +42,87 @@ enum ManagerRouteObservation: String, Codable, CaseIterable, Sendable {
     case silentCompletion = "silent-completion"
     case emptyFinalOutput = "empty-final-output"
     case targetInterrupted = "target-interrupted"
+    case destinationUnloaded = "destination-unloaded"
+    case expiredTaskContext = "expired-task-context"
+    case missingReceipt = "missing-receipt"
     case timeout
 
     var terminalClassification: ManagerRouteTerminalClassification {
-        self == .targetInterrupted ? .blocked : .uncertain
+        switch self {
+        case .targetInterrupted, .destinationUnloaded, .expiredTaskContext: .blocked
+        case .silentCompletion, .emptyFinalOutput, .missingReceipt, .timeout: .uncertain
+        }
     }
+}
+
+enum ManagerContinuationStageKind: String, Codable, CaseIterable, Hashable, Sendable {
+    case implementation
+    case independentReview = "independent-review"
+    case inScopeCorrection = "in-scope-correction"
+    case acceptedLocalCommit = "accepted-local-commit"
+    case canonicalCheckpoint = "canonical-checkpoint"
+    case explicitlyAuthorizedPhase = "explicitly-authorized-phase"
+}
+
+enum ManagerContinuationActor: String, Codable, CaseIterable, Hashable, Sendable {
+    case productSession = "product-session"
+    case reviewer
+    case administrator
+}
+
+enum ManagerOwnerGateKind: String, Codable, CaseIterable, Hashable, Sendable {
+    case materialScopeOrProductChoice = "material-scope-or-product-choice"
+    case credentialsOrPrivateData = "credentials-or-private-data"
+    case externalOrPublicMutation = "external-or-public-mutation"
+    case destructiveAction = "destructive-action"
+    case deploymentOrPromotion = "deployment-or-promotion"
+    case requestedVisualReview = "requested-visual-review"
+    case uncertainOrPossibleCommit = "uncertain-or-possible-commit"
+}
+
+enum ManagerContinuationDisposition: String, Codable, Sendable {
+    case advance
+    case inScopeCorrection = "in-scope-correction"
+    case ownerDecision = "owner-decision"
+    case safeStop = "safe-stop"
+}
+
+struct ManagerCanonicalContextBinding: Codable, Equatable, Sendable {
+    let productionsRootPath: String
+    let taskRegistrySHA256: String
+    let workspaceSHA256: String
+    let canvasSHA256: String
+    let instructionSHA256: [String: String]
+    let taskLifecycle: String
+    let taskPriority: String
+    let canvasCurrent: Bool
+}
+
+struct ManagerContinuationStage: Codable, Equatable, Sendable {
+    let id: String
+    let kind: ManagerContinuationStageKind
+    let actor: ManagerContinuationActor
+    let targetThreadID: String
+    let action: String
+    let authorityReference: String
+    let timeoutSeconds: Int
+    let nextStageID: String?
+    let correctionStageID: String?
+}
+
+struct ManagerStandingContinuationEnvelope: Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+    let schemaVersion: Int
+    let envelopeUUID: UUID
+    let taskID: String
+    let managerThreadID: String
+    let architectThreadID: String
+    let scope: String
+    let createdAt: Date
+    let initialStageID: String
+    let stages: [ManagerContinuationStage]
+    let hardStops: [ManagerOwnerGateKind]
+    let initialContext: ManagerCanonicalContextBinding
 }
 
 enum ManagerRouteMonitorKind: String, Codable, Sendable {
@@ -72,6 +148,26 @@ struct ManagerTerminalHandoff: Codable, Equatable, Sendable {
     let evidence: [String]
     let nextGate: String
     let unperformedBoundaries: [String]
+    let continuationDisposition: ManagerContinuationDisposition?
+    let ownerGate: ManagerOwnerGateKind?
+    let resultingContext: ManagerCanonicalContextBinding?
+
+    init(
+        classification: ManagerRouteTerminalClassification, summary: String, evidence: [String],
+        nextGate: String, unperformedBoundaries: [String],
+        continuationDisposition: ManagerContinuationDisposition? = nil,
+        ownerGate: ManagerOwnerGateKind? = nil,
+        resultingContext: ManagerCanonicalContextBinding? = nil
+    ) {
+        self.classification = classification
+        self.summary = summary
+        self.evidence = evidence
+        self.nextGate = nextGate
+        self.unperformedBoundaries = unperformedBoundaries
+        self.continuationDisposition = continuationDisposition
+        self.ownerGate = ownerGate
+        self.resultingContext = resultingContext
+    }
 }
 
 struct ManagerAuthorizedNextRoute: Codable, Equatable, Sendable {
@@ -95,6 +191,11 @@ struct ManagerRouteRecord: Codable, Equatable, Sendable {
     let createdAt: Date
     let timeoutAt: Date
     let nextAuthorizedRoute: ManagerAuthorizedNextRoute?
+    let continuationEnvelopeUUID: UUID?
+    let continuationStageID: String?
+    let predecessorOperationUUID: UUID?
+    let predecessorTerminalSHA256: String?
+    let canonicalContext: ManagerCanonicalContextBinding?
     private(set) var state: ManagerRouteState
     private(set) var updatedAt: Date
     private(set) var receiptAcknowledgedAt: Date?
@@ -107,7 +208,10 @@ struct ManagerRouteRecord: Codable, Equatable, Sendable {
     init(
         operationUUID: UUID, taskID: String, managerThreadID: String, targetThreadID: String,
         action: String, authorityReference: String, createdAt: Date, timeoutAt: Date,
-        nextAuthorizedRoute: ManagerAuthorizedNextRoute?
+        nextAuthorizedRoute: ManagerAuthorizedNextRoute?,
+        continuationEnvelopeUUID: UUID? = nil, continuationStageID: String? = nil,
+        predecessorOperationUUID: UUID? = nil, predecessorTerminalSHA256: String? = nil,
+        canonicalContext: ManagerCanonicalContextBinding? = nil
     ) {
         schemaVersion = Self.schemaVersion
         self.operationUUID = operationUUID
@@ -119,6 +223,11 @@ struct ManagerRouteRecord: Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.timeoutAt = timeoutAt
         self.nextAuthorizedRoute = nextAuthorizedRoute
+        self.continuationEnvelopeUUID = continuationEnvelopeUUID
+        self.continuationStageID = continuationStageID
+        self.predecessorOperationUUID = predecessorOperationUUID
+        self.predecessorTerminalSHA256 = predecessorTerminalSHA256
+        self.canonicalContext = canonicalContext
         state = .queued
         updatedAt = createdAt
         receiptAcknowledgedAt = nil
@@ -182,9 +291,6 @@ struct ManagerRouteRecord: Codable, Equatable, Sendable {
         guard state.isTerminalReceipt, terminalHandoff != nil else {
             throw ManagerRoutingError.invalidTransition("Only a durable terminal receipt can be forwarded or escalated.")
         }
-        if requiresOwnerDecision, terminalHandoff?.classification != .completed {
-            throw ManagerRoutingError.invalidTransition("Only a completed route with an expired next gate uses completion-deadline escalation.")
-        }
         if terminalHandoff?.classification == .completed, !requiresOwnerDecision {
             state = .forwarded
             advancedRouteOperationUUID = advancedRouteID
@@ -196,8 +302,8 @@ struct ManagerRouteRecord: Codable, Equatable, Sendable {
         } else {
             state = .ownerDecisionRequired
             monitor = ManagerRouteMonitor(kind: .ownerDecision, wakeAt: nil)
-            let note = requiresOwnerDecision
-                ? "Terminal completion is durable, but the authorized next-route deadline expired; Manager or owner decision required."
+            let note = terminalHandoff?.classification == .completed
+                ? "Terminal completion is durable, but continuation is not safely eligible; Manager or owner decision required."
                 : "Terminal blocker or uncertainty requires one owner-facing decision."
             transitions.append(.init(state: state, occurredAt: date, note: note))
         }
@@ -225,10 +331,28 @@ struct ManagerRoutingLedger: Codable, Equatable, Sendable {
     static let schemaVersion = 1
     let schemaVersion: Int
     var routes: [ManagerRouteRecord]
+    var continuationEnvelopes: [ManagerStandingContinuationEnvelope]
 
-    init(routes: [ManagerRouteRecord] = []) {
+    init(routes: [ManagerRouteRecord] = [], continuationEnvelopes: [ManagerStandingContinuationEnvelope] = []) {
         schemaVersion = Self.schemaVersion
         self.routes = routes
+        self.continuationEnvelopes = continuationEnvelopes
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, routes, continuationEnvelopes }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        routes = try values.decode([ManagerRouteRecord].self, forKey: .routes)
+        continuationEnvelopes = try values.decodeIfPresent([ManagerStandingContinuationEnvelope].self, forKey: .continuationEnvelopes) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(schemaVersion, forKey: .schemaVersion)
+        try values.encode(routes, forKey: .routes)
+        if !continuationEnvelopes.isEmpty { try values.encode(continuationEnvelopes, forKey: .continuationEnvelopes) }
     }
 }
 
@@ -402,11 +526,61 @@ struct ApplicationSupportManagerRoutingLedgerStore: ManagerRoutingLedgerStoring,
             throw ManagerRoutingError.storageCorrupt("Unsupported routing ledger schema.")
         }
         var ids = Set<UUID>()
+        var envelopeIDs = Set<UUID>()
+        for envelope in ledger.continuationEnvelopes {
+            guard envelopeIDs.insert(envelope.envelopeUUID).inserted else {
+                throw ManagerRoutingError.storageCorrupt("Duplicate standing continuation envelope UUID.")
+            }
+            try ManagerRoutingValidation.validate(envelope)
+        }
         for route in ledger.routes {
             guard ids.insert(route.operationUUID).inserted else { throw ManagerRoutingError.storageCorrupt("Duplicate routing operation UUID.") }
             try ManagerRoutingValidation.validate(route)
+            if let envelopeID = route.continuationEnvelopeUUID {
+                guard let envelope = ledger.continuationEnvelopes.first(where: { $0.envelopeUUID == envelopeID }),
+                      let stageID = route.continuationStageID,
+                      let stage = envelope.stages.first(where: { ManagerRoutingUTF8.equal($0.id, stageID) }),
+                      ManagerRoutingUTF8.equal(envelope.taskID, route.taskID),
+                      ManagerRoutingUTF8.equal(envelope.managerThreadID, route.managerThreadID),
+                      ManagerRoutingUTF8.equal(stage.targetThreadID, route.targetThreadID),
+                      ManagerRoutingUTF8.equal(stage.action, route.action),
+                      ManagerRoutingUTF8.equal(stage.authorityReference, route.authorityReference),
+                      let context = route.canonicalContext,
+                      ManagerRoutingUTF8.equal(context.productionsRootPath, envelope.initialContext.productionsRootPath) else {
+                    throw ManagerRoutingError.storageCorrupt("A route does not resolve to its immutable standing continuation envelope and stage.")
+                }
+                try ManagerRoutingValidation.validate(context)
+            } else if route.continuationStageID != nil || route.canonicalContext != nil ||
+                        route.predecessorOperationUUID != nil || route.predecessorTerminalSHA256 != nil {
+                throw ManagerRoutingError.storageCorrupt("A route contains orphaned standing-continuation data.")
+            }
         }
         let byID = Dictionary(uniqueKeysWithValues: ledger.routes.map { ($0.operationUUID, $0) })
+        for route in ledger.routes where route.continuationEnvelopeUUID != nil {
+            let envelope = ledger.continuationEnvelopes.first { $0.envelopeUUID == route.continuationEnvelopeUUID }!
+            if let predecessorID = route.predecessorOperationUUID {
+                guard let predecessor = byID[predecessorID],
+                      predecessor.continuationEnvelopeUUID == route.continuationEnvelopeUUID,
+                      predecessor.advancedRouteOperationUUID == route.operationUUID,
+                      let handoff = predecessor.terminalHandoff,
+                      handoff.classification == .completed,
+                      ManagerRoutingUTF8.equal(
+                        route.predecessorTerminalSHA256 ?? "",
+                        try ManagerRoutingValidation.terminalSHA256(handoff)
+                      ),
+                      let predecessorStageID = predecessor.continuationStageID,
+                      let predecessorStage = envelope.stages.first(where: { ManagerRoutingUTF8.equal($0.id, predecessorStageID) }),
+                      let expectedStageID = ManagerRoutingValidation.selectedStageID(handoff, from: predecessorStage),
+                      ManagerRoutingUTF8.equal(expectedStageID, route.continuationStageID ?? "") else {
+                    throw ManagerRoutingError.storageCorrupt("A continuation child does not bind its exact predecessor terminal receipt and stage edge.")
+                }
+            } else {
+                guard route.predecessorTerminalSHA256 == nil,
+                      ManagerRoutingUTF8.equal(route.continuationStageID ?? "", envelope.initialStageID) else {
+                    throw ManagerRoutingError.storageCorrupt("A continuation route lacks its exact predecessor linkage.")
+                }
+            }
+        }
         var reservationOwners: [UUID: UUID] = [:]
         for parent in ledger.routes {
             guard let reservation = parent.nextAuthorizedRoute?.operationUUID else { continue }
@@ -421,19 +595,31 @@ struct ApplicationSupportManagerRoutingLedgerStore: ManagerRoutingLedgerStoring,
             }
         }
         for parent in ledger.routes where parent.advancedRouteOperationUUID != nil {
-            guard let advanced = parent.advancedRouteOperationUUID,
-                  let template = parent.nextAuthorizedRoute, template.operationUUID == advanced,
-                  let child = byID[advanced],
+            guard let advanced = parent.advancedRouteOperationUUID, let child = byID[advanced],
                   ManagerRoutingUTF8.equal(child.taskID, parent.taskID),
                   ManagerRoutingUTF8.equal(child.managerThreadID, parent.managerThreadID),
-                  ManagerRoutingUTF8.equal(child.targetThreadID, template.targetThreadID),
-                  ManagerRoutingUTF8.equal(child.action, template.action),
-                  ManagerRoutingUTF8.equal(child.authorityReference, template.authorityReference),
-                  child.timeoutAt == template.timeoutAt, child.createdAt == parent.updatedAt else {
+                  child.createdAt == parent.updatedAt else {
                 throw ManagerRoutingError.storageCorrupt("An advanced route does not exactly match its immutable authorized template.")
+            }
+            if parent.continuationEnvelopeUUID != nil {
+                guard child.predecessorOperationUUID == parent.operationUUID,
+                      child.continuationEnvelopeUUID == parent.continuationEnvelopeUUID else {
+                    throw ManagerRoutingError.storageCorrupt("An advanced continuation route does not bind its exact parent.")
+                }
+            } else {
+                guard let template = parent.nextAuthorizedRoute, template.operationUUID == advanced,
+                      ManagerRoutingUTF8.equal(child.targetThreadID, template.targetThreadID),
+                      ManagerRoutingUTF8.equal(child.action, template.action),
+                      ManagerRoutingUTF8.equal(child.authorityReference, template.authorityReference),
+                      child.timeoutAt == template.timeoutAt else {
+                    throw ManagerRoutingError.storageCorrupt("An advanced route does not exactly match its immutable authorized template.")
+                }
             }
         }
         guard let previous else { return }
+        guard previous.continuationEnvelopes == ledger.continuationEnvelopes.prefix(previous.continuationEnvelopes.count).map({ $0 }) else {
+            throw ManagerRoutingError.storageCorrupt("A standing continuation envelope was changed or deleted.")
+        }
         let proposed = Dictionary(uniqueKeysWithValues: ledger.routes.map { ($0.operationUUID, $0) })
         for old in previous.routes {
             guard let new = proposed[old.operationUUID] else { throw ManagerRoutingError.storageCorrupt("A durable route was deleted.") }
@@ -457,6 +643,26 @@ struct ManagerRouteCreateRequest: Equatable, Sendable {
     let nextAction: String?
     let nextAuthorityReference: String?
     let nextTimeoutAt: Date?
+    let standingContinuation: ManagerStandingContinuationEnvelope?
+
+    init(
+        taskID: String, managerThreadID: String, targetThreadID: String, action: String,
+        authorityReference: String, timeoutAt: Date, nextTargetThreadID: String?,
+        nextAction: String?, nextAuthorityReference: String?, nextTimeoutAt: Date?,
+        standingContinuation: ManagerStandingContinuationEnvelope? = nil
+    ) {
+        self.taskID = taskID
+        self.managerThreadID = managerThreadID
+        self.targetThreadID = targetThreadID
+        self.action = action
+        self.authorityReference = authorityReference
+        self.timeoutAt = timeoutAt
+        self.nextTargetThreadID = nextTargetThreadID
+        self.nextAction = nextAction
+        self.nextAuthorityReference = nextAuthorityReference
+        self.nextTimeoutAt = nextTimeoutAt
+        self.standingContinuation = standingContinuation
+    }
 }
 
 struct ManagerRoutingStatusItem: Codable, Equatable, Sendable {
@@ -469,6 +675,32 @@ struct ManagerRoutingStatusItem: Codable, Equatable, Sendable {
     let unresolvedAgeSeconds: Int
     let timeoutAt: Date
     let overdue: Bool
+    let action: String
+    let authorityReference: String
+    let continuationStageID: String?
+    let decisionRecipientThreadID: String?
+
+    init(
+        operationUUID: UUID, taskID: String, targetThreadID: String, state: ManagerRouteState,
+        waitingFor: ManagerRouteWaitingFor, ageSeconds: Int, unresolvedAgeSeconds: Int,
+        timeoutAt: Date, overdue: Bool, action: String = "Route action unavailable.",
+        authorityReference: String = "Authority unavailable.", continuationStageID: String? = nil,
+        decisionRecipientThreadID: String? = nil
+    ) {
+        self.operationUUID = operationUUID
+        self.taskID = taskID
+        self.targetThreadID = targetThreadID
+        self.state = state
+        self.waitingFor = waitingFor
+        self.ageSeconds = ageSeconds
+        self.unresolvedAgeSeconds = unresolvedAgeSeconds
+        self.timeoutAt = timeoutAt
+        self.overdue = overdue
+        self.action = action
+        self.authorityReference = authorityReference
+        self.continuationStageID = continuationStageID
+        self.decisionRecipientThreadID = decisionRecipientThreadID
+    }
 }
 
 struct ManagerRoutingCommandResult: Codable, Equatable, Sendable {
@@ -499,23 +731,46 @@ struct ManagerRoutingReconciliationPlan: Codable, Equatable, Sendable {
     let diagnostic: String
 }
 
-struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
+struct ManagerRoutingService: ManagerRoutingStatusReading, @unchecked Sendable {
     let store: any ManagerRoutingLedgerStoring
+    let contextResolver: any ManagerCanonicalContextResolving
+    let contextLocking: any ManagerCanonicalContextLocking
     let now: @Sendable () -> Date
     let makeOperationID: @Sendable () -> UUID
 
     init(
         store: any ManagerRoutingLedgerStoring = ApplicationSupportManagerRoutingLedgerStore(),
+        contextResolver: any ManagerCanonicalContextResolving = LiveManagerCanonicalContextResolver(),
+        contextLocking: any ManagerCanonicalContextLocking = LiveManagerCanonicalContextLock(),
         now: @escaping @Sendable () -> Date = Date.init,
         makeOperationID: @escaping @Sendable () -> UUID = UUID.init
     ) {
         self.store = store
+        self.contextResolver = contextResolver
+        self.contextLocking = contextLocking
         self.now = now
         self.makeOperationID = makeOperationID
     }
 
     func create(_ request: ManagerRouteCreateRequest) throws -> ManagerRoutingCommandResult {
         try ManagerRoutingValidation.validate(request, now: now())
+        var contextLock: AnyObject?
+        defer { withExtendedLifetime(contextLock) {} }
+        if let envelope = request.standingContinuation {
+            try ManagerRoutingValidation.validate(envelope, request: request)
+            guard let acquired = contextLocking.acquire(
+                productionsRootPath: envelope.initialContext.productionsRootPath
+            ) else {
+                throw ManagerRoutingError.invalidTransition("Canonical Registry/Canvas context is busy or unavailable; no route UUID or ledger mutation occurred.")
+            }
+            contextLock = acquired
+            let live = try contextResolver.resolve(
+                productionsRootPath: envelope.initialContext.productionsRootPath, taskID: request.taskID
+            )
+            guard live.bytewiseEquals(envelope.initialContext), live.canvasCurrent else {
+                throw ManagerRoutingError.staleLedger("The standing-continuation authorization is stale or its Task is not Canvas-current. Reread canonical state; do not route it.")
+            }
+        }
         let operationID = makeOperationID()
         let next = try makeNext(request)
         guard next?.operationUUID != operationID else {
@@ -536,8 +791,17 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
                     operationUUID: operationID, taskID: request.taskID,
                     managerThreadID: request.managerThreadID, targetThreadID: request.targetThreadID,
                     action: request.action, authorityReference: request.authorityReference,
-                    createdAt: date, timeoutAt: request.timeoutAt, nextAuthorizedRoute: next
+                    createdAt: date, timeoutAt: request.timeoutAt, nextAuthorizedRoute: next,
+                    continuationEnvelopeUUID: request.standingContinuation?.envelopeUUID,
+                    continuationStageID: request.standingContinuation?.initialStageID,
+                    canonicalContext: request.standingContinuation?.initialContext
                 ))
+                if let envelope = request.standingContinuation {
+                    guard !ledger.continuationEnvelopes.contains(where: { $0.envelopeUUID == envelope.envelopeUUID }) else {
+                        throw ManagerRoutingError.duplicateOperation("The standing continuation envelope UUID already exists.")
+                    }
+                    ledger.continuationEnvelopes.append(envelope)
+                }
             }
         } catch let error as ManagerRoutingError {
             switch error {
@@ -564,7 +828,29 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
         operationID: UUID, targetThreadID: String, handoff: ManagerTerminalHandoff
     ) throws -> ManagerRoutingCommandResult {
         let date = secondPrecision(now())
-        let snapshot = try store.transact(expectedSHA256: nil) { ledger in
+        let before = try store.snapshot()
+        let beforeRoute = try route(operationID, in: before)
+        let liveContextResult: Result<ManagerCanonicalContextBinding, Error>?
+        var contextLock: AnyObject?
+        defer { withExtendedLifetime(contextLock) {} }
+        if let context = beforeRoute.canonicalContext {
+            if let acquired = contextLocking.acquire(productionsRootPath: context.productionsRootPath) {
+                contextLock = acquired
+                liveContextResult = Result {
+                    try contextResolver.resolve(productionsRootPath: context.productionsRootPath, taskID: beforeRoute.taskID)
+                }
+            } else {
+                liveContextResult = .failure(ManagerRoutingError.storageUncertain(
+                    "Canonical Registry/Canvas context is busy or unavailable."
+                ))
+            }
+        } else {
+            liveContextResult = nil
+        }
+        if beforeRoute.continuationEnvelopeUUID != nil, handoff.continuationDisposition == nil {
+            throw ManagerRoutingError.invalidInput("A standing-continuation terminal handoff requires an exact continuation disposition.")
+        }
+        let snapshot = try store.transact(expectedSHA256: before.sha256) { ledger in
             guard let index = ledger.routes.firstIndex(where: { $0.operationUUID == operationID }) else {
                 throw ManagerRoutingError.notFound("Routing operation not found.")
             }
@@ -572,7 +858,63 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
             guard inserted else { return }
             var childID: UUID?
             var expiredNextRoute = false
-            if handoff.classification == .completed, let next = ledger.routes[index].nextAuthorizedRoute {
+            var forceDecision = handoff.classification != .completed || handoff.continuationDisposition == .ownerDecision
+            if handoff.ownerGate != nil { forceDecision = true }
+            if let envelopeID = ledger.routes[index].continuationEnvelopeUUID {
+                guard let envelope = ledger.continuationEnvelopes.first(where: { $0.envelopeUUID == envelopeID }),
+                      let currentStageID = ledger.routes[index].continuationStageID,
+                      let currentStage = envelope.stages.first(where: { ManagerRoutingUTF8.equal($0.id, currentStageID) }) else {
+                    throw ManagerRoutingError.storageCorrupt("The terminal route lost its continuation envelope or stage.")
+                }
+                let liveContext: ManagerCanonicalContextBinding?
+                switch liveContextResult {
+                case let .success(value): liveContext = value
+                case .failure, .none: liveContext = nil; forceDecision = true
+                }
+                if let liveContext {
+                    if !liveContext.canvasCurrent { forceDecision = true }
+                    if let expected = ledger.routes[index].canonicalContext,
+                       !liveContext.bytewiseEquals(expected) {
+                        let checkpointChangeIsBound = currentStage.kind == .canonicalCheckpoint &&
+                            handoff.resultingContext?.bytewiseEquals(liveContext) == true &&
+                            expected.onlyWorkspaceHashDiffers(from: liveContext)
+                        if !checkpointChangeIsBound { forceDecision = true }
+                    } else if let resulting = handoff.resultingContext,
+                              !resulting.bytewiseEquals(liveContext) {
+                        forceDecision = true
+                    }
+                }
+                let nextStageID: String? = switch handoff.continuationDisposition ?? .safeStop {
+                case .advance: currentStage.nextStageID
+                case .inScopeCorrection: currentStage.correctionStageID
+                case .ownerDecision, .safeStop: nil
+                }
+                if handoff.continuationDisposition == .inScopeCorrection, currentStage.correctionStageID == nil {
+                    forceDecision = true
+                }
+                if !forceDecision, let nextStageID {
+                    guard let nextStage = envelope.stages.first(where: { ManagerRoutingUTF8.equal($0.id, nextStageID) }) else {
+                        throw ManagerRoutingError.storageCorrupt("The continuation terminal points to an unresolved stage.")
+                    }
+                    let generated = makeOperationID()
+                    let reservations = Set(ledger.routes.compactMap { $0.nextAuthorizedRoute?.operationUUID })
+                    guard !ledger.routes.contains(where: { $0.operationUUID == generated }),
+                          !reservations.contains(generated) else {
+                        throw ManagerRoutingError.duplicateOperation("The generated continuation route UUID collides with a durable route or reservation.")
+                    }
+                    childID = generated
+                    ledger.routes.append(.init(
+                        operationUUID: generated, taskID: envelope.taskID,
+                        managerThreadID: envelope.managerThreadID, targetThreadID: nextStage.targetThreadID,
+                        action: nextStage.action, authorityReference: nextStage.authorityReference,
+                        createdAt: date, timeoutAt: date.addingTimeInterval(TimeInterval(nextStage.timeoutSeconds)),
+                        nextAuthorizedRoute: nil, continuationEnvelopeUUID: envelope.envelopeUUID,
+                        continuationStageID: nextStage.id, predecessorOperationUUID: operationID,
+                        predecessorTerminalSHA256: try ManagerRoutingValidation.terminalSHA256(handoff),
+                        canonicalContext: liveContext
+                    ))
+                }
+            } else if handoff.classification == .completed, let next = ledger.routes[index].nextAuthorizedRoute {
                 if date >= next.timeoutAt {
                     expiredNextRoute = true
                 } else {
@@ -589,21 +931,25 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
                 }
             }
             try ledger.routes[index].finalizeTerminal(
-                at: date, advancedRouteID: childID, requiresOwnerDecision: expiredNextRoute
+                at: date, advancedRouteID: childID, requiresOwnerDecision: expiredNextRoute || forceDecision
             )
         }
         let current = try route(operationID, in: snapshot)
         return result(
             route: current, snapshot: snapshot,
-            classification: current.state == .ownerDecisionRequired ? "owner-decision-required" : "terminal-forwarded",
-            diagnostic: current.state == .ownerDecisionRequired ? "One concise owner decision is required; do not retry the routed action automatically." : nil,
-            noRetry: current.state == .ownerDecisionRequired
+            classification: current.state == ManagerRouteState.ownerDecisionRequired ? "owner-decision-required" : "terminal-forwarded",
+            diagnostic: current.state == ManagerRouteState.ownerDecisionRequired ? "One concise owner decision is required; do not retry the routed action automatically." : nil,
+            noRetry: current.state == ManagerRouteState.ownerDecisionRequired
         )
     }
 
     func inspect(operationID: UUID) throws -> ManagerRoutingCommandResult {
         let snapshot = try store.snapshot()
         return result(route: try route(operationID, in: snapshot), snapshot: snapshot, classification: "inspected")
+    }
+
+    func canonicalContext(productionsRootPath: String, taskID: String) throws -> ManagerCanonicalContextBinding {
+        try contextResolver.resolve(productionsRootPath: productionsRootPath, taskID: taskID)
     }
 
     func inspection(operationID: UUID) throws -> ManagerRoutingInspection {
@@ -619,7 +965,13 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
             return .init(
                 operationUUID: route.operationUUID, taskID: route.taskID, targetThreadID: route.targetThreadID,
                 state: route.state, waitingFor: route.waitingFor(), ageSeconds: age,
-                unresolvedAgeSeconds: unresolved, timeoutAt: route.timeoutAt, overdue: now() >= route.timeoutAt
+                unresolvedAgeSeconds: unresolved, timeoutAt: route.timeoutAt, overdue: now() >= route.timeoutAt,
+                action: route.action, authorityReference: route.authorityReference,
+                continuationStageID: route.continuationStageID,
+                decisionRecipientThreadID: route.state == .ownerDecisionRequired
+                    ? route.continuationEnvelopeUUID.flatMap { id in
+                        snapshot.ledger.continuationEnvelopes.first(where: { $0.envelopeUUID == id })?.architectThreadID
+                    } : nil
             )
         }.sorted { lhs, rhs in
             lhs.waitingFor.rawValue == rhs.waitingFor.rawValue
@@ -662,6 +1014,9 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
         case .silentCompletion: "Target appears complete but returned no structured terminal handoff. Record uncertainty; do not repeat the routed action."
         case .emptyFinalOutput: "Target returned empty final output. Record uncertainty; do not repeat the routed action."
         case .targetInterrupted: "Target was interrupted before a structured terminal handoff. Record a blocker; do not repeat the routed action."
+        case .destinationUnloaded: "The destination task is unavailable or unloaded before a structured terminal handoff. Record a blocker; do not repeat the routed action."
+        case .expiredTaskContext: "The destination task context expired before a structured terminal handoff. Record a blocker; reread canonical context before any new route."
+        case .missingReceipt: "The destination produced no durable receipt. Record uncertainty; inspect before any further action."
         case .timeout: "The monitored route exceeded its wake deadline without a terminal handoff. Escalate uncertainty; do not repeat the routed action."
         }
         let unsigned = "\(operationID.uuidString)|\(observation.rawValue)|\(current.state.rawValue)|\(proposed.rawValue)|\(snapshot.sha256)"
@@ -753,6 +1108,11 @@ struct ManagerRoutingService: ManagerRoutingStatusReading, Sendable {
 }
 
 enum ManagerRoutingValidation {
+    static func terminalSHA256(_ handoff: ManagerTerminalHandoff) throws -> String {
+        let data = try JSONEncoder.managerRouting.encode(handoff)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     static func validate(_ request: ManagerRouteCreateRequest, now: Date) throws {
         guard secondPrecision(request.timeoutAt),
               request.nextTimeoutAt.map(secondPrecision) ?? true else {
@@ -767,6 +1127,65 @@ enum ManagerRoutingValidation {
         if let value = request.nextAction, !line(value) { throw ManagerRoutingError.invalidInput("The next action is invalid.") }
         if let value = request.nextAuthorityReference, !line(value) { throw ManagerRoutingError.invalidInput("The next authority reference is invalid.") }
         if let value = request.nextTimeoutAt, value <= request.timeoutAt { throw ManagerRoutingError.invalidInput("The next route timeout must be later than the current route timeout.") }
+        if request.standingContinuation != nil,
+           [request.nextTargetThreadID, request.nextAction, request.nextAuthorityReference].contains(where: { $0 != nil }) ||
+            (request.standingContinuation != nil && request.nextTimeoutAt != nil) {
+            throw ManagerRoutingError.invalidInput("A standing continuation envelope cannot be combined with the legacy one-step next route.")
+        }
+    }
+
+    static func validate(_ envelope: ManagerStandingContinuationEnvelope, request: ManagerRouteCreateRequest? = nil) throws {
+        guard envelope.schemaVersion == ManagerStandingContinuationEnvelope.schemaVersion,
+              envelope.taskID.range(of: #"^TASK-[0-9]{4,}$"#, options: .regularExpression) != nil,
+              thread(envelope.managerThreadID), thread(envelope.architectThreadID), line(envelope.scope),
+              !envelope.stages.isEmpty,
+              envelope.hardStops.count == ManagerOwnerGateKind.allCases.count,
+              Set(envelope.hardStops) == Set(ManagerOwnerGateKind.allCases),
+              secondPrecision(envelope.createdAt),
+              envelope.initialContext.canvasCurrent,
+              line(envelope.initialContext.productionsRootPath),
+              envelope.initialContext.taskRegistrySHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              envelope.initialContext.workspaceSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              envelope.initialContext.canvasSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            throw ManagerRoutingError.storageCorrupt("The standing continuation envelope or canonical binding is incomplete.")
+        }
+        var stageIDs = Set<String>()
+        for stage in envelope.stages {
+            guard line(stage.id), stageIDs.insert(stage.id).inserted, thread(stage.targetThreadID),
+                  line(stage.action), line(stage.authorityReference), stage.timeoutSeconds > 0,
+                  stage.timeoutSeconds <= 604_800 else {
+                throw ManagerRoutingError.storageCorrupt("A standing continuation stage is invalid or duplicated.")
+            }
+            let expectedActor: ManagerContinuationActor = switch stage.kind {
+            case .independentReview: .reviewer
+            case .canonicalCheckpoint: .administrator
+            case .implementation, .inScopeCorrection, .acceptedLocalCommit, .explicitlyAuthorizedPhase: .productSession
+            }
+            guard stage.actor == expectedActor else {
+                throw ManagerRoutingError.storageCorrupt("A continuation stage has the wrong authority role.")
+            }
+        }
+        guard stageIDs.contains(envelope.initialStageID) else {
+            throw ManagerRoutingError.storageCorrupt("The initial continuation stage does not resolve.")
+        }
+        for stage in envelope.stages {
+            if let next = stage.nextStageID, !stageIDs.contains(next) {
+                throw ManagerRoutingError.storageCorrupt("A continuation next-stage edge does not resolve.")
+            }
+            if let correction = stage.correctionStageID, !stageIDs.contains(correction) {
+                throw ManagerRoutingError.storageCorrupt("A continuation correction-stage edge does not resolve.")
+            }
+        }
+        if let request {
+            guard ManagerRoutingUTF8.equal(envelope.taskID, request.taskID),
+                  ManagerRoutingUTF8.equal(envelope.managerThreadID, request.managerThreadID),
+                  let initial = envelope.stages.first(where: { ManagerRoutingUTF8.equal($0.id, envelope.initialStageID) }),
+                  ManagerRoutingUTF8.equal(initial.targetThreadID, request.targetThreadID),
+                  ManagerRoutingUTF8.equal(initial.action, request.action),
+                  ManagerRoutingUTF8.equal(initial.authorityReference, request.authorityReference) else {
+                throw ManagerRoutingError.invalidInput("The initial route does not exactly match its standing continuation envelope.")
+            }
+        }
     }
 
     static func validate(_ route: ManagerRouteRecord) throws {
@@ -798,11 +1217,21 @@ enum ManagerRoutingValidation {
                   terminals.first?.state == handoff.classification.state else {
                 throw ManagerRoutingError.storageCorrupt("The structured terminal handoff is incomplete or disagrees with its typed terminal transition.")
             }
+            if handoff.ownerGate != nil, handoff.continuationDisposition != .ownerDecision {
+                throw ManagerRoutingError.storageCorrupt("A genuine owner gate must route through the Architect decision disposition.")
+            }
+            if handoff.classification != .completed,
+               handoff.continuationDisposition == .advance || handoff.continuationDisposition == .inScopeCorrection {
+                throw ManagerRoutingError.storageCorrupt("A blocked or uncertain result cannot advance a continuation envelope.")
+            }
+            if let context = handoff.resultingContext { try validate(context) }
         }
         if route.state == .forwarded {
-            guard route.terminalHandoff?.classification == .completed,
-                  (route.nextAuthorizedRoute == nil && route.advancedRouteOperationUUID == nil) ||
-                  route.nextAuthorizedRoute?.operationUUID == route.advancedRouteOperationUUID else {
+            let advancedIsBound = route.continuationEnvelopeUUID != nil
+                ? route.nextAuthorizedRoute == nil
+                : (route.nextAuthorizedRoute == nil && route.advancedRouteOperationUUID == nil) ||
+                    route.nextAuthorizedRoute?.operationUUID == route.advancedRouteOperationUUID
+            guard route.terminalHandoff?.classification == .completed, advancedIsBound else {
                 throw ManagerRoutingError.storageCorrupt("A forwarded route does not exactly bind its completion or advanced route.")
             }
         }
@@ -847,6 +1276,11 @@ enum ManagerRoutingValidation {
               ManagerRoutingUTF8.equal(old.authorityReference, new.authorityReference),
               old.createdAt == new.createdAt, old.timeoutAt == new.timeoutAt,
               equal(old.nextAuthorizedRoute, new.nextAuthorizedRoute),
+              old.continuationEnvelopeUUID == new.continuationEnvelopeUUID,
+              utf8Optional(old.continuationStageID, new.continuationStageID),
+              old.predecessorOperationUUID == new.predecessorOperationUUID,
+              utf8Optional(old.predecessorTerminalSHA256, new.predecessorTerminalSHA256),
+              old.canonicalContext == new.canonicalContext,
               transitionPrefix(old.transitions, new.transitions),
               terminalIsSticky(old.terminalHandoff, new.terminalHandoff),
               old.advancedRouteOperationUUID == nil || old.advancedRouteOperationUUID == new.advancedRouteOperationUUID else {
@@ -897,7 +1331,31 @@ enum ManagerRoutingValidation {
     static func equal(_ lhs: ManagerTerminalHandoff, _ rhs: ManagerTerminalHandoff) -> Bool {
         lhs.classification == rhs.classification && ManagerRoutingUTF8.equal(lhs.summary, rhs.summary) &&
             equal(lhs.evidence, rhs.evidence) && ManagerRoutingUTF8.equal(lhs.nextGate, rhs.nextGate) &&
-            equal(lhs.unperformedBoundaries, rhs.unperformedBoundaries)
+            equal(lhs.unperformedBoundaries, rhs.unperformedBoundaries) &&
+            lhs.continuationDisposition == rhs.continuationDisposition && lhs.ownerGate == rhs.ownerGate &&
+            lhs.resultingContext == rhs.resultingContext
+    }
+
+    static func selectedStageID(
+        _ handoff: ManagerTerminalHandoff, from stage: ManagerContinuationStage
+    ) -> String? {
+        switch handoff.continuationDisposition {
+        case .advance: stage.nextStageID
+        case .inScopeCorrection: stage.correctionStageID
+        case .none, .ownerDecision, .safeStop: nil
+        }
+    }
+
+    static func validate(_ context: ManagerCanonicalContextBinding) throws {
+        guard line(context.productionsRootPath),
+              context.taskRegistrySHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              context.workspaceSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              context.canvasSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              line(context.taskLifecycle), line(context.taskPriority),
+              !context.instructionSHA256.isEmpty,
+              context.instructionSHA256.allSatisfy({ line($0.key) && $0.value.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil }) else {
+            throw ManagerRoutingError.storageCorrupt("A canonical continuation context binding is malformed.")
+        }
     }
 
     private static func equal(_ lhs: ManagerAuthorizedNextRoute?, _ rhs: ManagerAuthorizedNextRoute?) -> Bool {
@@ -913,6 +1371,14 @@ enum ManagerRoutingValidation {
 
     private static func equal(_ lhs: [String], _ rhs: [String]) -> Bool {
         lhs.count == rhs.count && zip(lhs, rhs).allSatisfy(ManagerRoutingUTF8.equal)
+    }
+
+    private static func utf8Optional(_ lhs: String?, _ rhs: String?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): true
+        case let (.some(lhs), .some(rhs)): ManagerRoutingUTF8.equal(lhs, rhs)
+        default: false
+        }
     }
 
     private static func thread(_ value: String) -> Bool {

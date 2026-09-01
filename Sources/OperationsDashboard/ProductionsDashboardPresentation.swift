@@ -10,6 +10,7 @@ enum ProductionsNavigationGroup: String, CaseIterable, Identifiable {
 
 enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     case inbox
+    case approvals
     case reconciliations
     case managerRouting
     case processing
@@ -25,6 +26,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .inbox: "Inbox"
+        case .approvals: "Architect Approvals"
         case .reconciliations: "Reconciliation Review"
         case .managerRouting: "Manager Routing"
         case .processing: "Processing"
@@ -40,6 +42,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     var emptyTitle: String {
         switch self {
         case .inbox: "Inbox is empty"
+        case .approvals: "No owner approvals pending"
         case .reconciliations: "No pending reconciliations"
         case .managerRouting: "No unresolved Manager routes"
         case .processing: "No processing bundles"
@@ -55,6 +58,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .inbox: "tray"
+        case .approvals: "person.crop.circle.badge.questionmark"
         case .reconciliations: "arrow.triangle.2.circlepath"
         case .managerRouting: "point.3.connected.trianglepath.dotted"
         case .processing: "shippingbox"
@@ -69,7 +73,7 @@ enum ProductionsNavigationSection: String, CaseIterable, Identifiable {
 
     var group: ProductionsNavigationGroup {
         switch self {
-        case .inbox, .reconciliations, .managerRouting, .processing: .intake
+        case .inbox, .approvals, .reconciliations, .managerRouting, .processing: .intake
         case .canvas, .crumbs, .mementos, .priorityWork: .focus
         case .workItems, .plans: .browse
         }
@@ -134,6 +138,8 @@ enum ProductionsDashboardPresentation {
                     department: normalizedDepartment(item.department)
                 )
             }
+        case .approvals:
+            approvalItems(in: state)
         case .reconciliations:
             state.reconciliations.map { item in
                 let department = targetDepartment(item.workID, in: state)
@@ -150,8 +156,8 @@ enum ProductionsDashboardPresentation {
                 ProductionsNavigationItem(
                     id: "manager-route:\(item.operationID.uuidString)", targetID: item.taskID,
                     title: "\(item.waitingFor.rawValue) · \(item.taskID)",
-                    subtitle: "\(item.state.rawValue) · unresolved \(item.unresolvedAgeSeconds)s",
-                    metadata: [item.operationID.uuidString, "Target \(item.targetThreadID)", "Age \(item.ageSeconds)s"] + (item.overdue ? ["Overdue"] : []),
+                    subtitle: "\(item.state.rawValue) · \(item.action) · unresolved \(item.unresolvedAgeSeconds)s",
+                    metadata: [item.operationID.uuidString, "Target \(item.targetThreadID)", item.authorityReference, "Age \(item.ageSeconds)s"] + (item.overdue ? ["Overdue"] : []),
                     department: "Office"
                 )
             }
@@ -278,6 +284,33 @@ enum ProductionsDashboardPresentation {
     private static func normalizedDepartment(_ value: String?) -> String? {
         let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty || value == "—" ? nil : value
+    }
+
+    private static func approvalItems(in state: ProductionsState) -> [ProductionsNavigationItem] {
+        let reconciliations = state.reconciliations.map { item in
+            let department = targetDepartment(item.workID, in: state)
+            let occurred = ISO8601DateFormatter().string(from: item.occurred)
+            return ProductionsNavigationItem(
+                id: "approval:reconciliation:\(item.operationID.uuidString)", targetID: item.workID,
+                title: "Reconciliation acknowledgement · \(item.workID)", subtitle: item.summary,
+                metadata: ["Architect review", occurred, item.operationID.uuidString, item.fields.joined(separator: ", "), departmentLabel(department)],
+                department: department
+            )
+        }
+        let routes = state.managerRouting.filter { $0.waitingFor == .owner }.map { item in
+            ProductionsNavigationItem(
+                id: "approval:route:\(item.operationID.uuidString)", targetID: item.taskID,
+                title: "Owner decision · \(item.taskID)", subtitle: item.action,
+                metadata: [
+                    item.operationID.uuidString, item.authorityReference,
+                    item.decisionRecipientThreadID.map { "Architect \($0)" } ?? "Architect recipient unavailable",
+                    "Unresolved \(item.unresolvedAgeSeconds)s",
+                ] + (item.overdue ? ["Overdue"] : []),
+                department: "Office"
+            )
+        }
+        var seen = Set<String>()
+        return (routes + reconciliations).sorted { $0.id < $1.id }.filter { seen.insert($0.id).inserted }
     }
 
     private static func departmentLabel(_ value: String?) -> String {

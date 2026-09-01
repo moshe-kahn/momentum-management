@@ -352,6 +352,31 @@ final class LifecyclePriorityTransactionsTests: XCTestCase {
         }
     }
 
+    func testReadOnlyStatusIgnoresOnlyWellFormedForeignRootsAndStillBlocksMalformedRoot() throws {
+        let fixture = try MetadataFixture(workspacePriority: "High"); defer { fixture.remove() }
+        let request = fixture.request(rule: .registryAuthoritative)
+        let preview = try fixture.service(operationID: operationID).preview(
+            request: request, configuration: fixture.configuration
+        )
+        _ = try fixture.service(operationID: operationID).perform(
+            request: request, confirmationToken: preview.confirmationToken, configuration: fixture.configuration
+        )
+        let resolver = ApplicationSupportReconciliationQueueResolver(
+            directory: fixture.recovery, foreignRootPolicy: .ignoreValidExactRootForReadOnlyStatus
+        )
+        XCTAssertTrue(try resolver.pendingEntries(
+            productionsRootPath: "/private/tmp/a-different-valid-productions-root", now: Date()
+        ).isEmpty)
+
+        let journalURL = fixture.recovery.appending(path: "\(operationID.uuidString).json")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: journalURL)) as? [String: Any])
+        object["productionsRootPath"] = "relative/malformed-root"
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: journalURL)
+        XCTAssertThrowsError(try resolver.pendingEntries(
+            productionsRootPath: "/private/tmp/a-different-valid-productions-root", now: Date()
+        ))
+    }
+
     func testConcurrentQueueAcknowledgementsAreSerializedAndCASValidated() throws {
         let fixture = try MetadataFixture(workspacePriority: "High"); defer { fixture.remove() }
         let request = fixture.request(rule: .registryAuthoritative)

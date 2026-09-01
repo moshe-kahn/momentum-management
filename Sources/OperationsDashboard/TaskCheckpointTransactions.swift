@@ -598,7 +598,7 @@ struct AdoptedOfficeV112ContractValidator: OfficeV112ContractValidating {
         "Warehouse/Reference/Momentum Management Filesystem Contract.md": "998e56b888c87a226fa5fe253fadfef975f5171e5663a1441e61930f3bb8fafa",
         "Warehouse/Reference/Task Status and Continuity Protocol.md": "8d8583cd859fbff3f861dbf38635aabf7aa5fd9eeeccaeca18103e8f00a4e4a7",
         "Warehouse/Reference/Task Intake and Promotion Policy.md": "7df7bf0e5de24cefa4807e48a5313671b2b9342460e788527a3988f0efc9b978",
-        "AGENTS.md": "e4706789b22eca6861b6559514c54090a4003988da8f67efb5c7b6870c1f1ce5",
+        "AGENTS.md": "530631592b66b0642f600a8e7ae436c2d0b44b2fb469362a0ca5820359e9a8af",
         "PRODUCTIONS_COORDINATOR.md": "aefd79d6b33b9a91f9f0f3a34811126c9a2467b92df1839baa3e37dd851576ce",
         "PRODUCTIONS_OFFICE_ADMINISTRATOR.md": "187c06aa6821f86556192c48185e639ab77280e8d5097cfbff481113f46d681e",
     ]

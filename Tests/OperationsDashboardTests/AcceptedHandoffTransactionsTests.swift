@@ -842,6 +842,36 @@ final class AcceptedHandoffTransactionsTests: XCTestCase {
         XCTAssertTrue(try queue.pendingEntries(configuration: fixture.configuration).isEmpty)
     }
 
+    func testAcceptedHandoffComposesDisplayOnlyRelationshipRepairAndBlocksSemanticDrift() throws {
+        let fixture = try HandoffFixture(); defer { fixture.remove() }
+        try fixture.replace(
+            in: fixture.registryURL,
+            "| TASK-0066 | Source Task | Active / Current | High | Laboratory | — | — | — | — |",
+            with: "| TASK-0066 | Source Task | Active / Current | High | Laboratory | — | PROJ-0008 | — | — |"
+        )
+        try fixture.replace(in: fixture.sourceURL, "Project: —", with: "Project: PROJ-0008 — Display label")
+        let recovery = URL(fileURLWithPath: "/private/tmp/HandoffRelationshipRecovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recovery) }
+        let store = ApplicationSupportAcceptedHandoffJournalStore(directory: recovery)
+        let service = AcceptedHandoffService(
+            journalStore: store, contractValidator: AcceptingHandoffValidator(),
+            makeOperationID: { self.operationID }, discover: { _, _, _ in [] }
+        )
+        let result = try service.perform(request: fixture.request(), configuration: fixture.configuration)
+        XCTAssertEqual(result.outcome, "committed")
+        XCTAssertTrue(String(decoding: try fixture.read(fixture.sourceURL), as: UTF8.self).contains("Project: PROJ-0008\n"))
+        XCTAssertEqual(try store.journal(operationID: operationID)?.lifecyclePriorityRepairs?.map(\.field), ["relationship:Project"])
+
+        let blocked = try HandoffFixture(); defer { blocked.remove() }
+        try blocked.replace(in: blocked.sourceURL, "Project: —", with: "Project: PROJ-0009")
+        let before = try blocked.snapshot()
+        XCTAssertThrowsError(try AcceptedHandoffService(
+            journalStore: HandoffMemoryJournal(), contractValidator: AcceptingHandoffValidator(),
+            makeOperationID: { self.operationID }, discover: { _, _, _ in [] }
+        ).perform(request: blocked.request(), configuration: blocked.configuration))
+        XCTAssertEqual(try blocked.snapshot(), before)
+    }
+
     func testLifecycleCorrectionCanResolveAcceptedHandoffOriginQueueEntry() throws {
         let fixture = try HandoffFixture(); defer { fixture.remove() }
         try fixture.replace(in: fixture.sourceURL, "Type: Task", with: "Type: Task\nPriority: Medium")

@@ -2,14 +2,15 @@ import Foundation
 
 enum HeadlessManagerRoutingCommandLine {
     static let usage = """
-    Usage: OperationsDashboard manager route create --task <TASK-ID> --manager-thread <thread-id> --target-thread <thread-id> --action <text> --authority <text> --timeout-at <ISO-8601> [--next-target-thread <thread-id> --next-action <text> --next-authority <text> --next-timeout-at <ISO-8601>]
+    Usage: OperationsDashboard manager route create --task <TASK-ID> --manager-thread <thread-id> --target-thread <thread-id> --action <text> --authority <text> --timeout-at <ISO-8601> [--next-target-thread <thread-id> --next-action <text> --next-authority <text> --next-timeout-at <ISO-8601>] [--standing-continuation-base64 <base64-json>]
            OperationsDashboard manager route acknowledge --operation <UUID> --target-thread <thread-id>
            OperationsDashboard manager route running --operation <UUID> --target-thread <thread-id>
-           OperationsDashboard manager route terminal --operation <UUID> --target-thread <thread-id> --classification <completed|blocked|uncertain> --summary <text> --evidence <text> [--evidence <text> ...] --next-gate <text> --unperformed <text> [--unperformed <text> ...]
+           OperationsDashboard manager route terminal --operation <UUID> --target-thread <thread-id> --classification <completed|blocked|uncertain> --summary <text> --evidence <text> [--evidence <text> ...] --next-gate <text> --unperformed <text> [--unperformed <text> ...] [--continuation-disposition <advance|in-scope-correction|owner-decision|safe-stop>] [--owner-gate <material-scope-or-product-choice|credentials-or-private-data|external-or-public-mutation|destructive-action|deployment-or-promotion|requested-visual-review|uncertain-or-possible-commit>] [--resulting-context-base64 <base64-json>]
            OperationsDashboard manager routing status
+           OperationsDashboard manager routing context --productions-root <path> --task <TASK-ID>
            OperationsDashboard manager routing inspect --operation <UUID>
            OperationsDashboard manager routing idle-check
-           OperationsDashboard manager routing reconcile preview --operation <UUID> --observation <silent-completion|empty-final-output|target-interrupted|timeout>
+           OperationsDashboard manager routing reconcile preview --operation <UUID> --observation <silent-completion|empty-final-output|target-interrupted|destination-unloaded|expired-task-context|missing-receipt|timeout>
            OperationsDashboard manager routing reconcile apply --operation <UUID> --observation <value> --expected-ledger-sha256 <64-lowercase-hex> --confirm <token>
     """
 
@@ -28,6 +29,7 @@ enum HeadlessManagerRoutingCommandLine {
             case let .running(id, target): write(try render(service.markRunning(operationID: id, targetThreadID: target)))
             case let .terminal(id, target, handoff): write(try render(service.receiveTerminal(operationID: id, targetThreadID: target, handoff: handoff)))
             case .status: write(try render(service.status()))
+            case let .context(root, task): write(try render(service.canonicalContext(productionsRootPath: root, taskID: task)))
             case let .inspect(id): write(try render(service.inspection(operationID: id)))
             case .idleCheck: write(try render(service.assertMayIdle()))
             case let .reconcilePreview(id, observation): write(try render(service.reconciliationPreview(operationID: id, observation: observation)))
@@ -61,6 +63,7 @@ enum HeadlessManagerRoutingCommandLine {
         case running(UUID, String)
         case terminal(UUID, String, ManagerTerminalHandoff)
         case status
+        case context(String, String)
         case inspect(UUID)
         case idleCheck
         case reconcilePreview(UUID, ManagerRouteObservation)
@@ -73,7 +76,7 @@ enum HeadlessManagerRoutingCommandLine {
             switch values[2] {
             case "create":
                 let parsed = try options(Array(values.dropFirst(3)), repeated: [])
-                let allowed = Set(["--task", "--manager-thread", "--target-thread", "--action", "--authority", "--timeout-at", "--next-target-thread", "--next-action", "--next-authority", "--next-timeout-at"])
+                let allowed = Set(["--task", "--manager-thread", "--target-thread", "--action", "--authority", "--timeout-at", "--next-target-thread", "--next-action", "--next-authority", "--next-timeout-at", "--standing-continuation-base64"])
                 let required = ["--task", "--manager-thread", "--target-thread", "--action", "--authority", "--timeout-at"]
                 guard Set(parsed.values.keys).isSubset(of: allowed), required.allSatisfy({ parsed.values[$0] != nil }),
                       let timeout = date(parsed.values["--timeout-at"]!) else { throw ManagerRoutingError.invalidInput(usage) }
@@ -86,13 +89,24 @@ enum HeadlessManagerRoutingCommandLine {
                 } else {
                     nextTimeout = nil
                 }
+                let standingContinuation: ManagerStandingContinuationEnvelope?
+                if let encoded = parsed.values["--standing-continuation-base64"] {
+                    guard let data = Data(base64Encoded: encoded) else {
+                        throw ManagerRoutingError.invalidInput("--standing-continuation-base64 must be valid base64 JSON.")
+                    }
+                    let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+                    guard let decoded = try? decoder.decode(ManagerStandingContinuationEnvelope.self, from: data) else {
+                        throw ManagerRoutingError.invalidInput("--standing-continuation-base64 must decode as one complete standing continuation envelope.")
+                    }
+                    standingContinuation = decoded
+                } else { standingContinuation = nil }
                 return .create(.init(
                     taskID: parsed.values["--task"]!, managerThreadID: parsed.values["--manager-thread"]!,
                     targetThreadID: parsed.values["--target-thread"]!, action: parsed.values["--action"]!,
                     authorityReference: parsed.values["--authority"]!, timeoutAt: timeout,
                     nextTargetThreadID: parsed.values["--next-target-thread"], nextAction: parsed.values["--next-action"],
                     nextAuthorityReference: parsed.values["--next-authority"],
-                    nextTimeoutAt: nextTimeout
+                    nextTimeoutAt: nextTimeout, standingContinuation: standingContinuation
                 ))
             case "acknowledge", "running":
                 let parsed = try options(Array(values.dropFirst(3)), repeated: [])
@@ -101,7 +115,7 @@ enum HeadlessManagerRoutingCommandLine {
                 return values[2] == "acknowledge" ? .acknowledge(id, target) : .running(id, target)
             case "terminal":
                 let parsed = try options(Array(values.dropFirst(3)), repeated: ["--evidence", "--unperformed"])
-                let allowed = Set(["--operation", "--target-thread", "--classification", "--summary", "--next-gate"])
+                let allowed = Set(["--operation", "--target-thread", "--classification", "--summary", "--next-gate", "--continuation-disposition", "--owner-gate", "--resulting-context-base64"])
                 guard Set(parsed.values.keys).isSubset(of: allowed),
                       Set(parsed.repeated.keys).isSubset(of: ["--evidence", "--unperformed"]),
                       let id = parsed.values["--operation"].flatMap(UUID.init(uuidString:)),
@@ -110,10 +124,31 @@ enum HeadlessManagerRoutingCommandLine {
                       let summary = parsed.values["--summary"], let next = parsed.values["--next-gate"],
                       !parsed.repeated["--evidence", default: []].isEmpty,
                       !parsed.repeated["--unperformed", default: []].isEmpty else { throw ManagerRoutingError.invalidInput(usage) }
+                let disposition = parsed.values["--continuation-disposition"].flatMap(ManagerContinuationDisposition.init(rawValue:))
+                if parsed.values["--continuation-disposition"] != nil, disposition == nil {
+                    throw ManagerRoutingError.invalidInput("The continuation disposition is invalid.")
+                }
+                let ownerGate = parsed.values["--owner-gate"].flatMap(ManagerOwnerGateKind.init(rawValue:))
+                if parsed.values["--owner-gate"] != nil, ownerGate == nil {
+                    throw ManagerRoutingError.invalidInput("The owner gate is invalid.")
+                }
+                let resultingContext: ManagerCanonicalContextBinding?
+                if let encoded = parsed.values["--resulting-context-base64"] {
+                    guard let data = Data(base64Encoded: encoded) else {
+                        throw ManagerRoutingError.invalidInput("--resulting-context-base64 must be valid base64 JSON.")
+                    }
+                    let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+                    guard let decoded = try? decoder.decode(ManagerCanonicalContextBinding.self, from: data) else {
+                        throw ManagerRoutingError.invalidInput("--resulting-context-base64 must decode as one complete canonical context binding.")
+                    }
+                    resultingContext = decoded
+                } else { resultingContext = nil }
                 return .terminal(id, target, .init(
                     classification: classification, summary: summary,
                     evidence: parsed.repeated["--evidence", default: []], nextGate: next,
-                    unperformedBoundaries: parsed.repeated["--unperformed", default: []]
+                    unperformedBoundaries: parsed.repeated["--unperformed", default: []],
+                    continuationDisposition: disposition, ownerGate: ownerGate,
+                    resultingContext: resultingContext
                 ))
             default: throw ManagerRoutingError.invalidInput(usage)
             }
@@ -121,6 +156,11 @@ enum HeadlessManagerRoutingCommandLine {
         guard values[1] == "routing" else { throw ManagerRoutingError.invalidInput(usage) }
         switch values[2] {
         case "status" where values.count == 3: return .status
+        case "context":
+            let parsed = try options(Array(values.dropFirst(3)), repeated: [])
+            guard parsed.values.count == 2, let root = parsed.values["--productions-root"],
+                  let task = parsed.values["--task"] else { throw ManagerRoutingError.invalidInput(usage) }
+            return .context(root, task)
         case "idle-check" where values.count == 3: return .idleCheck
         case "inspect":
             guard values.count == 5, values[3] == "--operation", let id = UUID(uuidString: values[4]) else { throw ManagerRoutingError.invalidInput(usage) }

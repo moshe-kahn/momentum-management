@@ -465,14 +465,24 @@ struct ApplicationSupportLifecyclePriorityJournalStore: LifecyclePriorityJournal
 /// which canonical writer originated the durable journal. The recovery
 /// directory itself is the cross-process serialization object; journal stores
 /// still perform their own immutable-envelope/CAS validation before rewriting.
+enum ReconciliationForeignRootPolicy: Equatable, Sendable {
+    case reject
+    case ignoreValidExactRootForReadOnlyStatus
+}
+
 struct ApplicationSupportReconciliationQueueResolver: ReconciliationQueueResolving, @unchecked Sendable {
     private let manager: FileManager
     private let directory: URL
+    private let foreignRootPolicy: ReconciliationForeignRootPolicy
 
-    init(manager: FileManager = .default, directory: URL? = nil) {
+    init(
+        manager: FileManager = .default, directory: URL? = nil,
+        foreignRootPolicy: ReconciliationForeignRootPolicy = .reject
+    ) {
         self.manager = manager
         self.directory = directory ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
+        self.foreignRootPolicy = foreignRootPolicy
     }
 
     func resolve(operationID: UUID, productionsRootPath: String) throws -> ReconciliationQueueRecord {
@@ -487,7 +497,9 @@ struct ApplicationSupportReconciliationQueueResolver: ReconciliationQueueResolvi
         return try withQueueLock {
             try recoverCommittedCorrectionsLocked(productionsRootPath: productionsRootPath)
             return try journalDescriptors().compactMap { descriptor in
-                guard let record = try resolveOptionalLocked(descriptor: descriptor, productionsRootPath: productionsRootPath) else { return nil }
+                guard let record = try resolveOptionalLocked(
+                    descriptor: descriptor, productionsRootPath: productionsRootPath
+                ) else { return nil }
                 guard record.historicalCommitProven, !record.repairs.isEmpty, record.disposition == .pending else { return nil }
                 return LifecyclePriorityQueueEntry(
                     operationUUID: record.operationUUID, workID: record.workID, workTitle: record.workTitle,
@@ -600,8 +612,13 @@ struct ApplicationSupportReconciliationQueueResolver: ReconciliationQueueResolvi
             guard let correction = try store.journal(operationID: correctionDescriptor.operationID) else { throw unavailable(correctionDescriptor.operationID) }
             guard correction.terminalState?.provesHistoricalCommit == true, let corrected = correction.correctsOperation else { continue }
             let correctionRecord = try lifecycleRecord(correction)
-            guard TaskCheckpointUTF8.equal(correctionRecord.productionsRootPath, productionsRootPath),
-                  correctionRecord.historicalCommitProven else {
+            if !TaskCheckpointUTF8.equal(correctionRecord.productionsRootPath, productionsRootPath) {
+                guard TaskCheckpointCanonicalRoot.isExact(correctionRecord.productionsRootPath) else {
+                    throw LifecyclePriorityValidationError.targetContractInvalid("A committed correction contains a malformed queue root.")
+                }
+                continue
+            }
+            guard correctionRecord.historicalCommitProven else {
                 throw LifecyclePriorityValidationError.targetContractInvalid("A committed correction does not semantically bind this queue root.")
             }
             let prior = try resolveLocked(operationID: corrected, productionsRootPath: productionsRootPath)
@@ -657,7 +674,9 @@ struct ApplicationSupportReconciliationQueueResolver: ReconciliationQueueResolvi
         return record
     }
 
-    private func resolveOptionalLocked(descriptor: Descriptor, productionsRootPath: String) throws -> ReconciliationQueueRecord? {
+    private func resolveOptionalLocked(
+        descriptor: Descriptor, productionsRootPath: String
+    ) throws -> ReconciliationQueueRecord? {
         let record: ReconciliationQueueRecord?
         switch descriptor.kind {
         case .lifecyclePriority:
@@ -672,6 +691,10 @@ struct ApplicationSupportReconciliationQueueResolver: ReconciliationQueueResolvi
         }
         guard let record else { return nil }
         guard TaskCheckpointUTF8.equal(record.productionsRootPath, productionsRootPath) else {
+            if foreignRootPolicy == .ignoreValidExactRootForReadOnlyStatus,
+               TaskCheckpointCanonicalRoot.isExact(record.productionsRootPath) {
+                return nil
+            }
             throw LifecyclePriorityValidationError.targetContractInvalid("The queue journal Productions root does not bytewise match the supplied root.")
         }
         return record
@@ -1127,14 +1150,19 @@ enum LifecyclePriorityMirrorReconciler {
             throw LifecyclePriorityValidationError.targetContractInvalid("A Task writer can reconcile only an exact Task mirror.")
         }
         let registry = try LifecyclePriorityRegistryDocument(data: registryData, kind: kind, workID: taskID)
-        let workspace = try LifecyclePriorityWorkspace(data: workspaceData, kind: kind, workID: taskID, registryRow: registry.row)
+        let relationships = try TaskRelationshipMirrorReconciler.task(
+            registryRow: registry.row, workspaceData: workspaceData
+        )
+        let workspace = try LifecyclePriorityWorkspace(
+            data: relationships.workspaceAfter, kind: kind, workID: taskID, registryRow: registry.row
+        )
         let lifecycle = registry.row[kind.stateHeader]!
         let registryPriority = registry.row["Priority"]!
         // A later writer's owner-authorized request binds the exact Registry hash, so that
         // bound Registry value is the explicit decision for its incidental mirror repair.
         let rule: LifecyclePriorityRule = .registryAuthoritative
         let priority = registryPriority
-        var repairs: [LifecyclePriorityRepair] = []
+        var repairs: [LifecyclePriorityRepair] = relationships.repairs
         if workspace.lifecycleValues.contains(where: { !TaskCheckpointUTF8.equal($0, lifecycle) }) {
             repairs.append(.init(field: "lifecycle", registryValueBefore: lifecycle, workspaceValuesBefore: workspace.lifecycleValues,
                                  chosenValue: lifecycle, rule: "registry-wins", provenance: "Registry"))

@@ -18,7 +18,7 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
     }
 
     func testNavigationSectionsUseReviewedIntakeFocusAndBrowseModes() {
-        XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .reconciliations, .managerRouting, .processing])
+        XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .intake), [.inbox, .approvals, .reconciliations, .managerRouting, .processing])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .focus), [.canvas, .crumbs, .mementos, .priorityWork])
         XCTAssertEqual(ProductionsDashboardPresentation.sections(in: .browse), [.workItems, .plans])
     }
@@ -48,6 +48,30 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertTrue(item.metadata.contains("Age 90s"))
         XCTAssertTrue(item.metadata.contains("Overdue"))
         XCTAssertTrue(ProductionsPresentationAccessibility.rowLabel(item).contains(operationID.uuidString))
+    }
+
+    func testArchitectApprovalsConsolidateAndDeduplicateGenuineOwnerItems() throws {
+        let routeID = UUID(uuidString: "32345678-1234-4234-8234-123456789ABC")!
+        let reconciliationID = UUID(uuidString: "42345678-1234-4234-8234-123456789ABC")!
+        let route = ManagerRoutingQueueItem(
+            operationID: routeID, taskID: "TASK-000001", targetThreadID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            state: .ownerDecisionRequired, waitingFor: .owner, ageSeconds: 120, unresolvedAgeSeconds: 40,
+            overdue: false, action: "Choose material scope.", authorityReference: "Owner completion envelope.",
+            continuationStageID: "review", decisionRecipientThreadID: "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        )
+        let reconciliation = ReconciliationQueueItem(
+            operationID: reconciliationID, workID: "TASK-000001", workTitle: "Office task",
+            fields: ["priority"], summary: "Confirm deterministic repair.", occurred: Date(timeIntervalSince1970: 1_787_000_000)
+        )
+        let items = ProductionsDashboardPresentation.items(
+            for: .approvals, in: richState(reconciliations: [reconciliation], managerRouting: [route])
+        )
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(Set(items.map(\.id)), Set([
+            "approval:route:\(routeID.uuidString)", "approval:reconciliation:\(reconciliationID.uuidString)",
+        ]))
+        XCTAssertTrue(items.first(where: { $0.id.contains("route") })?.metadata.contains("Architect dddddddd-dddd-4ddd-8ddd-dddddddddddd") == true)
+        XCTAssertFalse(items.contains { $0.id.hasPrefix("inbox:") }, "Administrative approvals never synthesize duplicate Quick Notes.")
     }
 
     func testWorkItemsAndPlansSeparateEveryCanonicalKindWithoutInventingProductDepartment() throws {
@@ -263,7 +287,7 @@ final class ProductionsDashboardPresentationTests: XCTestCase {
         XCTAssertEqual(model.noticeSeverity, .failure)
 
         model.prepareSession(targetID: "TASK-000001", authorization: .readOnly, model: "Codex", reasoning: "high")
-        XCTAssertEqual(model.noticeSeverity, .success)
+        XCTAssertEqual(model.noticeSeverity, .success, model.message ?? "No message")
         XCTAssertEqual(try fixture.snapshot(), before)
 
         try fixture.add(fixture.workspaceRecord + "\n\nConcurrent synthetic change.", at: "Workspace/TASK-000001/TASK-000001.md")
