@@ -160,8 +160,7 @@ struct ApplicationSupportTaskCheckpointJournalStore: TaskCheckpointJournalStore 
     }
 
     private var directory: URL {
-        directoryOverride ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
+        directoryOverride ?? RecoveryJournalRoot.directory(named: "Office Workspace Transaction Recovery", manager: manager)
     }
 
     func persist(_ journal: TaskCheckpointJournal) throws {

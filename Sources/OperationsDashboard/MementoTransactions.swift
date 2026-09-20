@@ -49,8 +49,7 @@ protocol MementoTransactionJournalStore {
 struct ApplicationSupportMementoTransactionJournalStore: MementoTransactionJournalStore {
     private let manager = FileManager.default
     private var directory: URL {
-        manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Memento Transaction Recovery", directoryHint: .isDirectory)
+        RecoveryJournalRoot.directory(named: "Memento Transaction Recovery", manager: manager)
     }
     func persist(_ journal: MementoTransactionJournal) throws { try write(journal) }
     func update(_ journal: MementoTransactionJournal) throws { try write(journal) }
@@ -78,12 +77,14 @@ private final class MementoWriteLock: NSObject {
 }
 struct LocalMementoTransactionLocking: MementoTransactionLocking {
     let manager: FileManager
-    let directory: URL
+    private let directoryOverride: URL?
+    private var directory: URL {
+        directoryOverride ?? RecoveryJournalRoot.directory(named: "Memento Transaction Locks", manager: manager)
+    }
 
     init(manager: FileManager = .default, directory: URL? = nil) {
         self.manager = manager
-        self.directory = directory ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Memento Transaction Locks", directoryHint: .isDirectory)
+        directoryOverride = directory
     }
 
     func acquire(ledgerURL: URL) -> AnyObject? {
@@ -127,14 +128,24 @@ struct MementoTransactionService {
     func startupRecovery() -> [MementoTransactionJournal] { (try? journalStore.incomplete()) ?? [] }
 
     func create(configuration: ProductionsConfiguration, targetID: String, draft: MementoDraft, reload: (ProductionsConfiguration) -> ProductionsState) throws -> MementoTransactionResult {
-        try issue(action: .create, configuration: configuration, targetID: targetID, draft: draft, reload: reload)
+        try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+            try issue(action: .create, configuration: configuration, targetID: targetID, draft: draft, reload: reload)
+        }
     }
 
     func supersede(configuration: ProductionsConfiguration, targetID: String, draft: MementoDraft, reload: (ProductionsConfiguration) -> ProductionsState) throws -> MementoTransactionResult {
-        try issue(action: .supersede, configuration: configuration, targetID: targetID, draft: draft, reload: reload)
+        try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+            try issue(action: .supersede, configuration: configuration, targetID: targetID, draft: draft, reload: reload)
+        }
     }
 
     func resolve(configuration: ProductionsConfiguration, targetID: String, reload: (ProductionsConfiguration) -> ProductionsState) throws -> MementoTransactionResult {
+        try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+            try resolveWithScopedRecoveryRoot(configuration: configuration, targetID: targetID, reload: reload)
+        }
+    }
+
+    private func resolveWithScopedRecoveryRoot(configuration: ProductionsConfiguration, targetID: String, reload: (ProductionsConfiguration) -> ProductionsState) throws -> MementoTransactionResult {
         let paths = Paths(configuration)
         guard let lock = locking.acquire(ledgerURL: paths.identifier) else { throw MementoTransactionError.lockUnavailable }
         defer { _ = lock }

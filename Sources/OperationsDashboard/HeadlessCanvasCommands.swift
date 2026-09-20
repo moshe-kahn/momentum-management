@@ -271,7 +271,9 @@ enum HeadlessCanvasCommandLine {
         if values.count > 1, values[1] == "inspect" {
             do {
                 let (operationID, configuration) = try parseInspection(values)
-                write(try renderDiagnostic(attentionAdapter.inspect(operationID: operationID, configuration: configuration)))
+                try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+                    write(try renderDiagnostic(attentionAdapter.inspect(operationID: operationID, configuration: configuration)))
+                }
                 return 0
             } catch {
                 write(error.localizedDescription)
@@ -281,7 +283,9 @@ enum HeadlessCanvasCommandLine {
         if values.count > 1, values[1] == "focus" || values[1] == "clear" {
             do {
                 let (command, configuration) = try parseAttention(values)
-                write(try attentionAdapter.execute(command, configuration: configuration).compactDescription)
+                try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+                    write(try attentionAdapter.execute(command, configuration: configuration).compactDescription)
+                }
                 return 0
             } catch let error as CanvasAttentionOperationError {
                 write(error.localizedDescription)
@@ -304,14 +308,18 @@ enum HeadlessCanvasCommandLine {
         do {
             switch try parse(values) {
             case let .preview(command, configuration):
-                let preview = try adapter.preview(for: command, configuration: configuration)
-                write(try renderPreview(preview, token: ConfirmedCommand.token(preview: preview)))
+                try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+                    let preview = try adapter.preview(for: command, configuration: configuration)
+                    write(try renderPreview(preview, token: ConfirmedCommand.token(preview: preview)))
+                }
                 return 0
             case let .execute(command, configuration):
-                switch try adapter.execute(command, configuration: configuration) {
-                case let .started(_, package): write(try renderPackage(package)); return 0
-                case let .stopped(result): write("Canvas stop committed for \(result.workID): \(result.appendedEvents.joined(separator: ", "))."); return 0
-                case let .startCanvasCommittedPackageFailed(diagnostic): write(diagnostic); return partialSuccessExitCode
+                return try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+                    switch try adapter.execute(command, configuration: configuration) {
+                    case let .started(_, package): write(try renderPackage(package)); return 0
+                    case let .stopped(result): write("Canvas stop committed for \(result.workID): \(result.appendedEvents.joined(separator: ", "))."); return 0
+                    case let .startCanvasCommittedPackageFailed(diagnostic): write(diagnostic); return partialSuccessExitCode
+                    }
                 }
             }
         } catch let error as CanvasOperationOutcomeError {

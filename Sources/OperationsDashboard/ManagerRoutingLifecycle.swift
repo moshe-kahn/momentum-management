@@ -389,8 +389,7 @@ struct ApplicationSupportManagerRoutingLedgerStore: ManagerRoutingLedgerStoring,
     }
 
     private var directory: URL {
-        directoryOverride ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Manager Routing Recovery", directoryHint: .isDirectory)
+        directoryOverride ?? RecoveryJournalRoot.directory(named: "Manager Routing Recovery", manager: manager)
     }
 
     private var ledgerURL: URL { directory.appending(path: "manager-routing-v1.json") }

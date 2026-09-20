@@ -70,11 +70,13 @@ enum HeadlessFlowCommandLine {
         let values = Array(arguments.dropFirst()); guard values.first == "flow" else { return nil }
         do {
             let (previewMode, command, configuration) = try parse(values)
-            if previewMode {
-                struct Output: Codable { let preview: FlowRegisterCommandPreview; let confirmationToken: String }
-                let preview = try adapter.preview(for: command, configuration: configuration); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-                write(String(decoding: try encoder.encode(Output(preview: preview, confirmationToken: try preview.confirmationToken())), as: UTF8.self))
-            } else { try adapter.execute(command, configuration: configuration); write("Flow registration committed for \(command.payloadPath).") }
+            try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+                if previewMode {
+                    struct Output: Codable { let preview: FlowRegisterCommandPreview; let confirmationToken: String }
+                    let preview = try adapter.preview(for: command, configuration: configuration); let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                    write(String(decoding: try encoder.encode(Output(preview: preview, confirmationToken: try preview.confirmationToken())), as: UTF8.self))
+                } else { try adapter.execute(command, configuration: configuration); write("Flow registration committed for \(command.payloadPath).") }
+            }
             return 0
         } catch let error as FlowRegistrationError {
             switch error {

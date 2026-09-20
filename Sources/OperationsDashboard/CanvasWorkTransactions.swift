@@ -181,8 +181,7 @@ extension CanvasWorkTransactionJournalStore {
 struct ApplicationSupportCanvasWorkTransactionJournalStore: CanvasWorkTransactionJournalStore {
     private let manager = FileManager.default
     private var directory: URL {
-        manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Canvas Work Transaction Recovery", directoryHint: .isDirectory)
+        RecoveryJournalRoot.directory(named: "Canvas Work Transaction Recovery", manager: manager)
     }
 
     func persist(_ journal: CanvasWorkTransactionJournal) throws { try write(journal) }

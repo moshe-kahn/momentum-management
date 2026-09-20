@@ -105,13 +105,15 @@ enum HeadlessMementoCommandLine {
         let values = Array(arguments.dropFirst()); guard values.first == "memento" else { return nil }
         do {
             let (previewMode, command, configuration) = try parse(values)
-            if previewMode {
-                struct Output: Codable { let preview: MementoCommandPreview; let confirmationToken: String }
-                let preview = try adapter.preview(for: command, configuration: configuration)
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-                write(String(decoding: try encoder.encode(Output(preview: preview, confirmationToken: try preview.confirmationToken())), as: UTF8.self))
+            try RecoveryJournalRoot.withProductionsRoot(configuration.productionsRootPath) {
+                if previewMode {
+                    struct Output: Codable { let preview: MementoCommandPreview; let confirmationToken: String }
+                    let preview = try adapter.preview(for: command, configuration: configuration)
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                    write(String(decoding: try encoder.encode(Output(preview: preview, confirmationToken: try preview.confirmationToken())), as: UTF8.self))
+                }
+                else { let result = try adapter.execute(command, configuration: configuration); write("Memento \(result.action.rawValue) committed for \(result.targetID): \(result.mementoID).") }
             }
-            else { let result = try adapter.execute(command, configuration: configuration); write("Memento \(result.action.rawValue) committed for \(result.targetID): \(result.mementoID).") }
             return 0
         } catch let error as MementoTransactionError {
             switch error {

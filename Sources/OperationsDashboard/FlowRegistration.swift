@@ -106,8 +106,7 @@ struct DurableReplacement: AtomicFileReplacing {
 struct ApplicationSupportFlowRegistrationJournalStore: FlowRegistrationJournalStore {
     private let manager = FileManager.default
     private var directory: URL {
-        manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Flow Registration Recovery", directoryHint: .isDirectory)
+        RecoveryJournalRoot.directory(named: "Flow Registration Recovery", manager: manager)
     }
 
     func persist(_ journal: FlowRegistrationJournal) throws { try write(journal) }

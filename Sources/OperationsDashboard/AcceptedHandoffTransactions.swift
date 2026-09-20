@@ -216,8 +216,7 @@ struct ApplicationSupportAcceptedHandoffJournalStore: AcceptedHandoffJournalStor
     }
 
     var directory: URL {
-        directoryOverride ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
+        directoryOverride ?? RecoveryJournalRoot.directory(named: "Office Workspace Transaction Recovery", manager: manager)
     }
 
     func persist(_ journal: AcceptedHandoffJournal) throws {
@@ -2168,8 +2167,7 @@ struct ApplicationSupportOfficeWorkspaceInspector: OfficeWorkspaceInspecting {
         lifecyclePriorityService: LifecyclePriorityService = LifecyclePriorityService()
     ) {
         self.manager = manager
-        self.directory = directory ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
+        self.directory = directory ?? RecoveryJournalRoot.directory(named: "Office Workspace Transaction Recovery", manager: manager)
         self.checkpointService = checkpointService
         self.acceptedHandoffService = acceptedHandoffService
         self.lifecyclePriorityService = lifecyclePriorityService

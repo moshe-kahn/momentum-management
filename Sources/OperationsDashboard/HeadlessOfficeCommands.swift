@@ -23,40 +23,42 @@ enum HeadlessOfficeCommandLine {
         guard let command = values.first, command == "task" || command == "review" || command == "office" else { return nil }
         do {
             let invocation = try parse(values)
-            switch invocation {
-            case let .checkpoint(request, configuration):
-                let result = try service.perform(request: request, configuration: configuration)
-                write(try render(result))
-                return exitCode(for: result.outcome)
-            case let .acceptHandoff(request, configuration):
-                let result = try acceptedHandoffService.perform(request: request, configuration: configuration)
-                write(try render(result))
-                return exitCode(for: result.outcome)
-            case let .reconcilePreview(request, configuration):
-                write(try render(lifecyclePriorityService.preview(request: request, configuration: configuration)))
-                return 0
-            case let .reconcileApply(request, token, configuration):
-                let result = try lifecyclePriorityService.perform(request: request, confirmationToken: token, configuration: configuration)
-                write(try render(result))
-                return exitCode(for: result.outcome)
-            case let .reconciliationList(configuration):
-                write(try render(lifecyclePriorityService.pendingEntries(configuration: configuration)))
-                return 0
-            case let .reconciliationAcknowledge(operationID, configuration):
-                let result = try lifecyclePriorityService.acknowledge(operationID: operationID, configuration: configuration)
-                write(try render(result))
-                return exitCode(for: result.outcome)
-            case let .inspect(operationID, configuration):
-                let resolved = try (inspector ?? ServiceBackedOfficeWorkspaceInspector(
-                    checkpointService: service, acceptedHandoffService: acceptedHandoffService,
-                    lifecyclePriorityService: lifecyclePriorityService
-                )).inspect(operationID: operationID, configuration: configuration)
-                switch resolved {
-                case let .checkpoint(result): write(try render(result))
-                case let .acceptedHandoff(result): write(try render(result))
-                case let .lifecyclePriority(result): write(try render(result))
+            return try RecoveryJournalRoot.withProductionsRoot(invocation.productionsRootPath) {
+                switch invocation {
+                case let .checkpoint(request, configuration):
+                    let result = try service.perform(request: request, configuration: configuration)
+                    write(try render(result))
+                    return exitCode(for: result.outcome)
+                case let .acceptHandoff(request, configuration):
+                    let result = try acceptedHandoffService.perform(request: request, configuration: configuration)
+                    write(try render(result))
+                    return exitCode(for: result.outcome)
+                case let .reconcilePreview(request, configuration):
+                    write(try render(lifecyclePriorityService.preview(request: request, configuration: configuration)))
+                    return 0
+                case let .reconcileApply(request, token, configuration):
+                    let result = try lifecyclePriorityService.perform(request: request, confirmationToken: token, configuration: configuration)
+                    write(try render(result))
+                    return exitCode(for: result.outcome)
+                case let .reconciliationList(configuration):
+                    write(try render(lifecyclePriorityService.pendingEntries(configuration: configuration)))
+                    return 0
+                case let .reconciliationAcknowledge(operationID, configuration):
+                    let result = try lifecyclePriorityService.acknowledge(operationID: operationID, configuration: configuration)
+                    write(try render(result))
+                    return exitCode(for: result.outcome)
+                case let .inspect(operationID, configuration):
+                    let resolved = try (inspector ?? ServiceBackedOfficeWorkspaceInspector(
+                        checkpointService: service, acceptedHandoffService: acceptedHandoffService,
+                        lifecyclePriorityService: lifecyclePriorityService
+                    )).inspect(operationID: operationID, configuration: configuration)
+                    switch resolved {
+                    case let .checkpoint(result): write(try render(result))
+                    case let .acceptedHandoff(result): write(try render(result))
+                    case let .lifecyclePriority(result): write(try render(result))
+                    }
+                    return 0
                 }
-                return 0
             }
         } catch let failure as TaskCheckpointCommandFailure {
             write((try? render(failure.result)) ?? failure.result.diagnostic ?? "Task checkpoint failed.")
@@ -100,6 +102,19 @@ enum HeadlessOfficeCommandLine {
         case reconciliationList(ProductionsConfiguration)
         case reconciliationAcknowledge(UUID, ProductionsConfiguration)
         case inspect(UUID, ProductionsConfiguration)
+
+        var productionsRootPath: String {
+            switch self {
+            case let .checkpoint(_, configuration),
+                 let .acceptHandoff(_, configuration),
+                 let .reconcilePreview(_, configuration),
+                 let .reconcileApply(_, _, configuration),
+                 let .reconciliationList(configuration),
+                 let .reconciliationAcknowledge(_, configuration),
+                 let .inspect(_, configuration):
+                configuration.productionsRootPath
+            }
+        }
     }
 
     static func parse(_ values: [String]) throws -> Invocation {

@@ -215,8 +215,7 @@ struct ApplicationSupportLifecyclePriorityJournalStore: LifecyclePriorityJournal
     }
 
     var directory: URL {
-        directoryOverride ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
+        directoryOverride ?? RecoveryJournalRoot.directory(named: "Office Workspace Transaction Recovery", manager: manager)
     }
 
     func persist(_ journal: LifecyclePriorityJournal) throws {
@@ -480,8 +479,7 @@ struct ApplicationSupportReconciliationQueueResolver: ReconciliationQueueResolvi
         foreignRootPolicy: ReconciliationForeignRootPolicy = .reject
     ) {
         self.manager = manager
-        self.directory = directory ?? manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appending(path: "Operations Dashboard/Office Workspace Transaction Recovery", directoryHint: .isDirectory)
+        self.directory = directory ?? RecoveryJournalRoot.directory(named: "Office Workspace Transaction Recovery", manager: manager)
         self.foreignRootPolicy = foreignRootPolicy
     }
 
