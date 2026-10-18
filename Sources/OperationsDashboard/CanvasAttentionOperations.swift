@@ -213,12 +213,12 @@ struct CanvasAttentionOperationService {
         reason: String,
         context: String,
         clearBasis: CanvasClearBasis? = nil,
-        reload: (ProductionsConfiguration) -> ProductionsState
+        reload: (ProductionsConfiguration) throws -> ProductionsState
     ) throws -> CanvasAttentionOperationResult {
         try CanvasContinuityPolicy.validate(desiredState: desiredState, clearBasis: clearBasis, kind: work.kind, lifecycle: work.lifecycle)
         let transactionContext = clearBasis.map { "\($0.auditContextPrefix) \(context)" } ?? context
         let operationID = makeOperationID()
-        let before = try canvas.inspect(configuration: configuration, work: work, state: reload(configuration))
+        let before = try canvas.inspect(configuration: configuration, work: work, state: reload(configuration), targetOnly: true)
         let attempts = max(1, retryPolicy.maximumAttempts)
 
         for attempt in 1...attempts {
@@ -286,7 +286,7 @@ struct CanvasAttentionOperationService {
         if let durableStatus = durableReconciliationStatus(for: journal) { return durableStatus }
         let state = ProductionsLoader(reader: reader).load(configuration: configuration)
         let inspection: CanvasOperationInspection
-        do { inspection = try canvas.inspect(configuration: configuration, work: work, state: state) }
+        do { inspection = try canvas.inspect(configuration: configuration, work: work, state: state, targetOnly: true) }
         catch {
             let diagnostic = "Canonical state could not be inspected safely: \(error.localizedDescription)"
             return historicalUncertaintyIfProven(journal: journal, diagnostic: diagnostic) ?? .uncertain(diagnostic)
@@ -307,7 +307,7 @@ struct CanvasAttentionOperationService {
         configuration: ProductionsConfiguration,
         work: WorkItem,
         before: CanvasOperationInspection,
-        reload: (ProductionsConfiguration) -> ProductionsState
+        reload: (ProductionsConfiguration) throws -> ProductionsState
     ) throws -> CanvasAttentionOperationResult {
         let loadedJournal: CanvasWorkTransactionJournal?
         do { loadedJournal = try canvas.journalStore.journal(transactionID: operationID) }
@@ -326,7 +326,7 @@ struct CanvasAttentionOperationService {
             )
         }
         let after: CanvasOperationInspection
-        do { after = try canvas.inspect(configuration: configuration, work: work, state: reload(configuration)) }
+        do { after = try canvas.inspect(configuration: configuration, work: work, state: try reload(configuration), targetOnly: true) }
         catch {
             journal.transition(to: .uncertain, diagnostic: "Canonical state could not be inspected safely: \(error.localizedDescription)")
             try? canvas.journalStore.update(journal)

@@ -302,7 +302,7 @@ struct CanvasWorkTransactionService {
         reason: String,
         context: String,
         clearBasis: CanvasClearBasis? = nil,
-        reload: (ProductionsConfiguration) -> ProductionsState
+        reload: (ProductionsConfiguration) throws -> ProductionsState
     ) throws -> CanvasWorkTransactionResult {
         try CanvasContinuityPolicy.validate(
             desiredState: action == .start ? .focused : .clear,
@@ -334,7 +334,7 @@ struct CanvasWorkTransactionService {
         reason: String,
         context: String,
         clearBasis: CanvasClearBasis? = nil,
-        reload: (ProductionsConfiguration) -> ProductionsState
+        reload: (ProductionsConfiguration) throws -> ProductionsState
     ) throws -> CanvasDesiredStateTransactionOutcome {
         try performLocked(
             action: desiredState.action,
@@ -360,7 +360,7 @@ struct CanvasWorkTransactionService {
         noOpWhenDesired: Bool,
         requiresCleanProductions: Bool,
         clearBasis: CanvasClearBasis?,
-        reload: (ProductionsConfiguration) -> ProductionsState
+        reload: (ProductionsConfiguration) throws -> ProductionsState
     ) throws -> CanvasDesiredStateTransactionOutcome {
         try validateField(reason, name: "Reason")
         try validateField(context, name: "Context")
@@ -368,7 +368,7 @@ struct CanvasWorkTransactionService {
         guard let lock = locking.acquire(canvasURL: canvasURL) else { throw CanvasWorkTransactionError.lockUnavailable }
         defer { _ = lock }
 
-        let baselineState = reload(configuration)
+        let baselineState = try reload(configuration)
         guard !requiresCleanProductions || baselineState.issues.isEmpty else {
             throw CanvasWorkTransactionError.conflict("Productions has contract issues; resolve them before changing Canvas.")
         }
@@ -389,7 +389,7 @@ struct CanvasWorkTransactionService {
         let canvasHash = hash(preimage)
         let document = String(decoding: preimage, as: UTF8.self)
         let rows = try parseCanvasRows(document)
-        try validateResolvedCanvasRows(rows, state: baselineState)
+        try validateResolvedCanvasRows(rows, state: baselineState, targetOnly: requiresCleanProductions ? nil : work)
         try validateTransitionHistory(rows, workID: work.id)
         let isCurrent = currentIDs(rows).contains(work.id)
         if noOpWhenDesired, (action == .start) == isCurrent {
@@ -478,7 +478,18 @@ struct CanvasWorkTransactionService {
             previousRows: rows, occurred: occurred, events: events, workID: work.id,
             reason: reason, context: context, canvasURL: canvasURL
         )
-        let state = reload(configuration)
+        let state: ProductionsState
+        do {
+            state = try reload(configuration)
+        } catch {
+            try finalizeJournalAfterProvenCommit(
+                journal: &journal, terminalState: .committedReloadFailed,
+                diagnostic: error.localizedDescription,
+                previousRows: rows, occurred: occurred, events: events, workID: work.id,
+                reason: reason, context: context, canvasURL: canvasURL
+            )
+            throw CanvasWorkTransactionError.reloadFailed("Canvas committed but canonical reload needs investigation: \(journal.diagnostic!)")
+        }
         guard !requiresCleanProductions || state.issues.isEmpty else {
             let diagnostic = state.issues.map(\.message).joined(separator: " · ")
             try finalizeJournalAfterProvenCommit(
@@ -498,7 +509,7 @@ struct CanvasWorkTransactionService {
             throw CanvasWorkTransactionError.reloadFailed(journal.diagnostic!)
         }
         let committedRows = try parseCanvasRows(String(decoding: Data(contentsOf: canvasURL), as: UTF8.self))
-        do { try validateResolvedCanvasRows(committedRows, state: state) }
+        do { try validateResolvedCanvasRows(committedRows, state: state, targetOnly: requiresCleanProductions ? nil : work) }
         catch {
             try finalizeJournalAfterProvenCommit(
                 journal: &journal, terminalState: .committedReloadFailed, diagnostic: error.localizedDescription,
@@ -574,11 +585,16 @@ struct CanvasWorkTransactionService {
         return hash(identity)
     }
 
-    func inspect(configuration: ProductionsConfiguration, work: WorkItem, state: ProductionsState) throws -> CanvasOperationInspection {
+    func inspect(
+        configuration: ProductionsConfiguration,
+        work: WorkItem,
+        state: ProductionsState,
+        targetOnly: Bool = false
+    ) throws -> CanvasOperationInspection {
         let targetHash = try validateTarget(work, configuration: configuration)
         let data = try Data(contentsOf: configuration.url(ProductionsPath.canvas.rawValue))
         let rows = try parseCanvasRows(String(decoding: data, as: UTF8.self))
-        try validateResolvedCanvasRows(rows, state: state)
+        try validateResolvedCanvasRows(rows, state: state, targetOnly: targetOnly ? work : nil)
         try validateTransitionHistory(rows, workID: work.id)
         return CanvasOperationInspection(canvasHash: hash(data), targetHash: targetHash, isCurrent: currentIDs(rows).contains(work.id), rows: rows)
     }
@@ -616,7 +632,20 @@ struct CanvasWorkTransactionService {
         catch { throw CanvasWorkTransactionError.conflict("Canvas table is malformed: \(error.localizedDescription)") }
     }
 
-    private func validateResolvedCanvasRows(_ rows: [[String: String]], state: ProductionsState) throws {
+    private func validateResolvedCanvasRows(
+        _ rows: [[String: String]],
+        state: ProductionsState,
+        targetOnly: WorkItem? = nil
+    ) throws {
+        if let targetOnly {
+            let workIDs = Set(state.work.map(\.id))
+            guard state.work.contains(where: { $0.id == targetOnly.id && $0.kind == targetOnly.kind }),
+                  rows.count == state.canvas.count,
+                  rows.allSatisfy({ workIDs.contains($0["Work ID"] ?? "") }) else {
+                throw CanvasWorkTransactionError.conflict("Canvas membership for \(targetOnly.id) cannot be resolved from its canonical target fingerprint.")
+            }
+            return
+        }
         let workIDs = Set(state.work.map(\.id))
         guard rows.count == state.canvas.count, rows.allSatisfy({ workIDs.contains($0["Work ID"] ?? "") }) else {
             throw CanvasWorkTransactionError.conflict("Canvas contains an unresolved or malformed canonical row.")

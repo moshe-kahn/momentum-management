@@ -45,6 +45,28 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
         XCTAssertEqual(try fixture.snapshot(), inactiveBefore)
     }
 
+    func testOrdinaryCanvasTargetErrorNamesTheExactRegistryField() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let path = ProductionsPath.tasks.rawValue
+        let invalidRegistry = String(decoding: try fixture.data(at: path), as: UTF8.self)
+            .replacingOccurrences(of: "../../Workspace/TASK-000001/TASK-000001.md", with: "../../Workspace/TASK-000001/not-canonical.md")
+        try fixture.add(invalidRegistry, at: path)
+        let before = try fixture.snapshot()
+        var output: [String] = []
+
+        XCTAssertEqual(
+            HeadlessCanvasCommandLine.runIfRequested(
+                arguments: attentionArguments("focus", root: fixture.root.path),
+                write: { output.append($0) }
+            ),
+            2
+        )
+        let diagnostic = output.joined(separator: "\n")
+        XCTAssertTrue(diagnostic.contains("Office/Registry/Tasks.md row TASK-000001 field Workspace"), diagnostic)
+        XCTAssertTrue(diagnostic.contains("expected canonical link Workspace/TASK-000001/TASK-000001.md"), diagnostic)
+        XCTAssertEqual(try fixture.snapshot(), before)
+    }
+
     func testPreviewBindsRootActionTargetReasonContextAndCanvasHash() throws {
         let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
         let draft = command(.start)
@@ -205,6 +227,46 @@ final class HeadlessCanvasCommandsTests: XCTestCase {
         output.removeAll()
         XCTAssertEqual(HeadlessCanvasCommandLine.runIfRequested(arguments: attentionArguments("clear", root: fixture.root.path), attentionAdapter: attentionAdapter, write: { output.append($0) }), 0)
         XCTAssertEqual(output, ["TASK-000001 is already clear for owner-stop; no Canvas event was appended. \(operationSuffix)"])
+    }
+
+    func testOrdinaryClearIgnoresMalformedOptionalCurrentMementoAndJournalsBeforeWriting() throws {
+        let fixture = try SyntheticProductionsFixture(); defer { fixture.remove() }
+        let malformedWorkspace = fixture.workspaceRecord.components(separatedBy: "\n\n## Current Memento").first!
+            + "\n\n## Current Memento\n\nMemento ID: MEM-000001\nCurrent state: Missing required fields."
+        try fixture.add(malformedWorkspace, at: "Workspace/TASK-000001/TASK-000001.md")
+        XCTAssertTrue(
+            fixture.load().issues.contains(.malformed("TASK-000001 Workspace: Malformed Productions configuration: partial Current Memento section"))
+        )
+
+        let canvasBefore = try fixture.data(at: ProductionsPath.canvas.rawValue)
+        var canvasAtJournalPersist: Data?
+        let journal = CommandJournal(afterPersist: { canvasAtJournalPersist = try? fixture.data(at: ProductionsPath.canvas.rawValue) })
+        let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000002076")!
+        let attention = CanvasAttentionOperationService(
+            canvas: CanvasWorkTransactionService(journalStore: journal, now: { self.date }),
+            retryPolicy: .init(maximumAttempts: 1, delay: 0), sleep: { _ in }, makeOperationID: { operationID }
+        )
+        var output: [String] = []
+
+        XCTAssertEqual(
+            HeadlessCanvasCommandLine.runIfRequested(
+                arguments: attentionArguments("clear", root: fixture.root.path),
+                attentionAdapter: HeadlessCanvasAttentionCommandAdapter(attention: attention),
+                write: { output.append($0) }
+            ),
+            0,
+            output.joined(separator: "\n")
+        )
+        XCTAssertEqual(output, ["Cleared TASK-000001 for owner-stop. Operation \(operationID.uuidString)."])
+        XCTAssertEqual(canvasAtJournalPersist, canvasBefore)
+        let persisted = try XCTUnwrap(journal.journals.first)
+        XCTAssertEqual(persisted.canvasPreimage, canvasBefore)
+        XCTAssertNotNil(persisted.expectedCanvasHash)
+        XCTAssertEqual(persisted.terminalState, .committed)
+        XCTAssertEqual(
+            try MarkdownTable.parse(String(decoding: fixture.data(at: ProductionsPath.canvas.rawValue), as: UTF8.self), required: ["Occurred", "Work ID", "Event", "Reason", "Context"]).last?["Event"],
+            "Cleared"
+        )
     }
 
     func testNormalCommitJournalFinalizationFailureIsExitThreeCurrentNoRetryAndTerminalFallback() throws {

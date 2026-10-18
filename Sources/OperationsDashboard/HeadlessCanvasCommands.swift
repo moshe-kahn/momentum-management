@@ -111,6 +111,140 @@ struct CanvasAttentionOperationDiagnostic: Codable, Equatable {
     let diagnostic: String?
 }
 
+/// The ordinary Focus/Clear writer deliberately reads only the target contract.
+/// The read model remains responsible for reporting optional Workspace-section
+/// diagnostics; those diagnostics must not make an otherwise canonical Canvas
+/// target unavailable.
+private struct CanvasAttentionTargetLoader {
+    let reader: any ProductionsReading
+
+    func load(workID: String, configuration: ProductionsConfiguration) throws -> WorkItem {
+        let specification: (kind: WorkKind, registry: ProductionsPath, idHeader: String, lifecycleHeader: String)
+        if workID.hasPrefix("TASK-") {
+            specification = (.task, .tasks, "Task ID", "State")
+        } else if workID.hasPrefix("IDEA-") {
+            specification = (.idea, .ideas, "Idea ID", "Disposition")
+        } else if workID.hasPrefix("PROJ-") {
+            specification = (.project, .projects, "Project ID", "State")
+        } else if workID.hasPrefix("INIT-") {
+            specification = (.initiative, .initiatives, "Initiative ID", "State")
+        } else {
+            throw unavailable(workID, "Registry identity", "the identifier prefix is unsupported")
+        }
+
+        let registryPath = specification.registry.rawValue
+        let registryURL = configuration.url(registryPath)
+        guard reader.exists(at: registryURL), reader.isReadable(at: registryURL) else {
+            throw unavailable(workID, registryPath, "the Registry record is missing or unreadable")
+        }
+
+        let rows: [[String: String]]
+        do {
+            rows = try MarkdownTable.parse(
+                String(decoding: reader.readData(at: registryURL), as: UTF8.self),
+                required: [specification.idHeader, "Title", specification.lifecycleHeader, "Priority", "Current lead", "Workspace"]
+            )
+        } catch {
+            throw unavailable(workID, registryPath, error.localizedDescription)
+        }
+        let matches = rows.filter { $0[specification.idHeader] == workID }
+        guard matches.count == 1, let row = matches.first else {
+            throw unavailable(workID, registryPath, matches.isEmpty ? "no matching Registry row exists" : "multiple matching Registry rows exist")
+        }
+
+        let requiredFields = ["Title", specification.lifecycleHeader, "Priority", "Current lead"]
+        for field in requiredFields where (row[field] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw unavailable(workID, "\(registryPath) row \(workID) field \(field)", "the required fingerprint field is blank")
+        }
+        let expectedWorkspace = "Workspace/\(workID)/\(workID).md"
+        let workspace = MarkdownTable.resolvedPath(row["Workspace"] ?? "", relativeTo: "Office/Registry")
+        guard workspace == expectedWorkspace else {
+            throw unavailable(workID, "\(registryPath) row \(workID) field Workspace", "expected canonical link \(expectedWorkspace), found \(workspace.isEmpty ? "an empty value" : workspace)")
+        }
+        let workspaceURL = configuration.url(workspace)
+        guard reader.exists(at: workspaceURL), reader.isReadable(at: workspaceURL) else {
+            throw unavailable(workID, workspace, "the canonical Workspace record is missing or unreadable")
+        }
+        return WorkItem(
+            id: workID,
+            kind: specification.kind,
+            title: row["Title"]!,
+            lifecycle: row[specification.lifecycleHeader]!,
+            priority: row["Priority"]!,
+            lead: row["Current lead"]!,
+            department: "",
+            product: "",
+            workspacePath: workspace,
+            related: [],
+            dependencies: [],
+            registryDescription: row["Short description"] ?? "",
+            content: nil,
+            workspace: nil
+        )
+    }
+
+    func state(workID: String, configuration: ProductionsConfiguration) throws -> ProductionsState {
+        let work = try load(workID: workID, configuration: configuration)
+        let canvasURL = configuration.url(ProductionsPath.canvas.rawValue)
+        guard reader.exists(at: canvasURL), reader.isReadable(at: canvasURL) else {
+            throw unavailable(workID, ProductionsPath.canvas.rawValue, "the Canvas record is missing or unreadable")
+        }
+        let rows: [[String: String]]
+        do {
+            rows = try CanvasMarkdown.parse(String(decoding: reader.readData(at: canvasURL), as: UTF8.self)).rows
+        } catch {
+            throw unavailable(workID, ProductionsPath.canvas.rawValue, error.localizedDescription)
+        }
+        let membershipWork = try canvasMembershipWork(rows: rows, selected: work, configuration: configuration)
+        let formatter = ISO8601DateFormatter()
+        let events = try rows.enumerated().map { index, row -> CanvasEvent in
+            guard let occurred = formatter.date(from: row["Occurred"] ?? "") else {
+                throw unavailable(workID, "\(ProductionsPath.canvas.rawValue) row \(index + 1) field Occurred", "the timestamp is malformed")
+            }
+            return CanvasEvent(occurred: occurred, workID: row["Work ID"] ?? "", event: row["Event"] ?? "", reason: row["Reason"] ?? "", context: row["Context"] ?? "", sequence: index)
+        }
+        return ProductionsState(
+            configuration: configuration,
+            inbox: [], processing: [], work: membershipWork, canvas: events, crumbs: [], mementos: [], issues: []
+        )
+    }
+
+    private func canvasMembershipWork(
+        rows: [[String: String]],
+        selected: WorkItem,
+        configuration: ProductionsConfiguration
+    ) throws -> [WorkItem] {
+        var result = [selected]
+        for id in Set(rows.compactMap { $0["Work ID"] }).subtracting([selected.id]) {
+            let specification: (kind: WorkKind, registry: ProductionsPath, idHeader: String)
+            if id.hasPrefix("TASK-") { specification = (.task, .tasks, "Task ID") }
+            else if id.hasPrefix("IDEA-") { specification = (.idea, .ideas, "Idea ID") }
+            else if id.hasPrefix("PROJ-") { specification = (.project, .projects, "Project ID") }
+            else if id.hasPrefix("INIT-") { specification = (.initiative, .initiatives, "Initiative ID") }
+            else { throw unavailable(selected.id, "\(ProductionsPath.canvas.rawValue) field Work ID", "\(id) has an unsupported identifier prefix") }
+            let registryURL = configuration.url(specification.registry.rawValue)
+            guard reader.exists(at: registryURL), reader.isReadable(at: registryURL) else {
+                throw unavailable(selected.id, "\(ProductionsPath.canvas.rawValue) field Work ID", "\(id) cannot resolve because \(specification.registry.rawValue) is unavailable")
+            }
+            let matches: [[String: String]]
+            do {
+                matches = try MarkdownTable.parse(String(decoding: reader.readData(at: registryURL), as: UTF8.self), required: [specification.idHeader]).filter { $0[specification.idHeader] == id }
+            } catch {
+                throw unavailable(selected.id, "\(ProductionsPath.canvas.rawValue) field Work ID", "\(id) cannot resolve because \(specification.registry.rawValue) is malformed: \(error.localizedDescription)")
+            }
+            guard matches.count == 1 else {
+                throw unavailable(selected.id, "\(ProductionsPath.canvas.rawValue) field Work ID", "\(id) resolves to \(matches.isEmpty ? "no" : "multiple") Registry identity rows")
+            }
+            result.append(WorkItem(id: id, kind: specification.kind, title: "", lifecycle: "", priority: "", lead: "", department: "", product: "", workspacePath: "", related: [], content: nil))
+        }
+        return result
+    }
+
+    private func unavailable(_ workID: String, _ record: String, _ detail: String) -> HeadlessCanvasCommandError {
+        .targetUnavailable("Canvas target \(workID) is unavailable: \(record): \(detail).")
+    }
+}
+
 struct HeadlessCanvasAttentionCommandAdapter {
     let attention: CanvasAttentionOperationService
     let reader: any ProductionsReading
@@ -126,15 +260,14 @@ struct HeadlessCanvasAttentionCommandAdapter {
             clearBasis: command.clearBasis,
             workID: command.workID
         )
-        let loader = ProductionsLoader(reader: reader)
-        let state = loader.load(configuration: configuration)
-        guard let work = state.work.first(where: { $0.id == command.workID }), work.workspace != nil else {
-            throw HeadlessCanvasCommandError.targetUnavailable("The requested Registry-backed work item is unavailable or malformed: \(command.workID).")
-        }
+        let targetLoader = CanvasAttentionTargetLoader(reader: reader)
+        let work = try targetLoader.load(workID: command.workID, configuration: configuration)
         guard command.desiredState != .focused || !work.lifecycle.hasPrefix("Done") else {
             throw HeadlessCanvasCommandError.startUnavailable("Focus is unavailable for completed work: \(work.id).")
         }
-        return try attention.perform(desiredState: command.desiredState, configuration: configuration, work: work, reason: command.reason, context: command.context, clearBasis: command.clearBasis, reload: loader.load)
+        return try attention.perform(desiredState: command.desiredState, configuration: configuration, work: work, reason: command.reason, context: command.context, clearBasis: command.clearBasis) {
+            try targetLoader.state(workID: command.workID, configuration: $0)
+        }
     }
 
     func inspect(operationID: UUID, configuration: ProductionsConfiguration) throws -> CanvasAttentionOperationDiagnostic {
@@ -145,15 +278,18 @@ struct HeadlessCanvasAttentionCommandAdapter {
         if let durableStatus = attention.durableReconciliationStatus(for: journal) {
             return diagnostic(journal: journal, desiredState: desiredState, status: durableStatus)
         }
-        let state = ProductionsLoader(reader: reader).load(configuration: configuration)
-        guard let work = state.work.first(where: { $0.id == journal.workID }) else {
+        let targetLoader = CanvasAttentionTargetLoader(reader: reader)
+        let work: WorkItem
+        do {
+            work = try targetLoader.load(workID: journal.workID, configuration: configuration)
+        } catch {
             if journal.terminalState?.provesHistoricalCommit == true {
                 let status = CanvasAttentionReconciliationStatus.historicallyCommittedWithCurrentStateUncertain(
                     "The journal proves a historical commit, but the canonical target is unavailable, so current state is uncertain. The historical commit must not be retried."
                 )
                 return diagnostic(journal: journal, desiredState: desiredState, status: status)
             }
-            throw HeadlessCanvasCommandError.targetUnavailable("The journal target is unavailable in canonical Productions: \(journal.workID).")
+            throw error
         }
         let status = try attention.reconcile(operationID: operationID, desiredState: desiredState, configuration: configuration, work: work, reader: reader)
         return diagnostic(journal: journal, desiredState: desiredState, status: status)
